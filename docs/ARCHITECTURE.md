@@ -141,3 +141,31 @@ All persistent state on Android is stored in app-private storage:
 2. **Minimal Third-Party Bloat**: Use platform-native tools and robust standard libraries (Python `asyncio`/`sqlite3`/`gi`, Android `kotlinx.coroutines`/`Jetpack`).
 3. **Resilience**: Network dropouts or app closures must result in deterministic error states without data corruption.
 4. **Extensibility**: The control plane message format is strictly versioned (`protocol_version: 1`), enabling future additions (clipboard, notifications) without breaking core transfer infrastructure.
+
+---
+
+## 7. Local Discovery Subsystem Architecture (Phase 2A)
+
+```
++-------------------------------------------------------------------------------+
+|                             mDNS / DNS-SD Subnet                              |
+|                       Service Type: _ferry._tcp.local.                        |
++---------------------------------------+---------------------------------------+
+                                        |
+                 +----------------------+----------------------+
+                 |                                             |
++----------------v----------------------+   +------------------v----------------+
+|       Linux Discovery Manager         |   |      Android Discovery Engine     |
+|   (zeroconf.asyncio.AsyncZeroconf)    |   |     (android.net.nsd.NsdManager)  |
+|                                       |   |                                   |
+| - Registers: AsyncServiceInfo         |   | - Registers: NsdServiceInfo       |
+| - Browses: AsyncServiceBrowser        |   | - Browses: discoverServices()     |
+| - Resolves: async_request()           |   | - Resolves: resolveService()      |
+| - Deduplicates: device_id in memory   |   | - MulticastLock: WiFi management  |
+| - Dispatches: UI callback events      |   | - StateFlow: DiscoveredDevice list|
++---------------------------------------+   +-----------------------------------+
+```
+
+### DiscoveredDevice vs. TrustedDevice Boundary
+* **`DiscoveredDevice`**: Ephemeral in-memory object representing an unauthenticated peer visible on the LAN. Holds transport info (IPs, port, TXT metadata) and availability flags. Does **not** grant trust or allow file transfers.
+* **`TrustedDevice`**: Cryptographically authenticated identity persisted in SQLite (Linux) or Keystore (Android) following explicit user pairing in Phase 2C. Discovered devices only become trusted after SAS out-of-band verification.

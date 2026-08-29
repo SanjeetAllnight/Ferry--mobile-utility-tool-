@@ -6,39 +6,45 @@ This document is the primary persistent context file for **Ferry**. It reflects 
 
 ## 1. Project Phase & Milestone
 
-* **Current Phase**: **Phase 1 — Project Foundation & Architecture**
-* **Current Milestone**: **M1.0 (Foundation, Toolchain, Skeletons, and Agent Operating Manual)**
-* **Project Status**: Skeletons established, toolchains verified, builds and tests operational on Linux and Android.
+* **Current Phase**: **Phase 2A — Local Device Discovery (Physical E2E Verified)**
+* **Current Milestone**: **M2.0 (mDNS/DNS-SD Peer Discovery via AsyncZeroconf & NsdManager)**
+* **Project Status**: Skeletons operational, discovery engine implemented and physically verified between Arch Linux and Android over Wi-Fi with automated unit/integration tests passing.
 
 ---
 
 ## 2. Architecture & Protocol Summary
 
 * **Protocol Version**: `dev.ferry.v1` (2-byte `FY` magic + 4-byte big-endian uint32 payload length + JSON envelope).
-* **Linux Stack**: Python 3.14 + `PyGObject` (GTK4 + Libadwaita 1) + `asyncio` + SQLite.
-* **Android Stack**: Kotlin 2.1 + Jetpack Compose + Material 3 + Android SDK 35/36.
-* **Security Model**: LAN is untrusted. Mutual Ed25519 identity, SAS out-of-band numeric PIN pairing, TLS 1.3 / ChaCha20-Poly1305 transport, SHA-256 integrity verification.
+* **Discovery Service Type**: `_ferry._tcp.local.` (Linux) / `_ferry._tcp` (Android).
+* **Discovery TXT Attributes**: `v=1`, `id=<UUIDv4>`, `name=<display_name>`, `type=desktop|mobile`, `os=archlinux|android`, `port=53770`, `app_version=0.1.0`.
+* **Linux Stack**: Python 3.14 + `zeroconf.asyncio` (`AsyncZeroconf`) + `PyGObject` (GTK4 + Libadwaita 1) + `asyncio` + SQLite.
+* **Android Stack**: Kotlin 2.1 + `android.net.nsd.NsdManager` + Jetpack Compose + Material 3 + Android SDK 35/36.
+* **Security Model**: LAN is untrusted. Discovery only establishes peer availability; discovered peers are unauthenticated until explicit cryptographic pairing in Phase 2C.
 
 ---
 
-## 3. Implemented Functionality (Phase 1)
+## 3. Implemented & Verified Functionality
 
 * [x] **Project Repository & Configuration**: Standardized structure, `.gitignore`, `README.md`, and agent operating manual (`AGENTS.md`).
 * [x] **Comprehensive Documentation Suite**: `ARCHITECTURE.md`, `PROTOCOL.md`, `SECURITY.md`, `DEVELOPMENT.md`, `TESTING.md`, `DECISIONS.md`, and `PROJECT_STATE.md`.
-* [x] **Linux Application & Service Skeleton**:
-  * Python packaging (`pyproject.toml`).
-  * XDG directory and configuration manager (`core/config.py`).
-  * SQLite persistence manager for trusted peers and transfer logs (`core/db.py`).
-  * Asyncio Ferry core service skeleton (`core/service.py`).
-  * Protocol v1 binary framer and message models (`protocol/models.py`).
-  * GTK4 / Libadwaita desktop UI (`ui/app.py`, `ui/window.py`).
-  * Unit test suite (`tests/`).
-* [x] **Android Application Skeleton**:
-  * Gradle build configuration (`settings.gradle.kts`, `build.gradle.kts`, `app/build.gradle.kts`, `gradle/libs.versions.toml`).
-  * Self-contained Gradle 9.4.1 wrapper.
-  * Jetpack Compose UI with Ferry branding and Phase 1 status card (`dev.ferry.app.ui.FerryApp`).
-  * Protocol v1 constants and model contracts (`dev.ferry.app.protocol.ProtocolConstants`).
-  * Unit test suite (`app/src/test/`).
+* [x] **Linux Discovery Subsystem (`linux/src/ferry_linux/core/discovery.py`)**:
+  * `AsyncZeroconf` service advertisement with dynamic local IP enumeration and standard Ferry TXT attributes.
+  * `AsyncServiceBrowser` and `AsyncServiceInfo` peer resolution.
+  * In-memory deduplication by stable `device_id` and self-advertisement filtering.
+  * Event listener callbacks for device appearance and removal.
+  * Live dynamic "Nearby Devices" display in GTK4 / Libadwaita window (`linux/src/ferry_linux/ui/window.py`).
+  * Automated unit tests (`test_discovery_models.py`, `test_discovery_manager.py`) and live mDNS loopback test (`test_discovery_integration.py`).
+* [x] **Android Discovery Subsystem (`android/app/src/main/kotlin/dev/ferry/app/discovery/`)**:
+  * `NsdManager` service registration and discovery engine (`FerryDiscoveryEngine.kt`).
+  * MulticastLock management for background/foreground packet reception.
+  * Thread-safe `StateFlow<List<DiscoveredDevice>>` emitting resolved peers.
+  * Dynamic Compose UI in `FerryApp.kt` rendering discovered Arch Linux hosts.
+  * Automated unit tests (`DiscoveredDeviceTest.kt`).
+* [x] **Physical End-to-End Discovery Verification**:
+  * Physical Android device (`Realme RMX3870`, Android 16 / SDK 36) connected on `10.213.207.31` over Wi-Fi.
+  * Arch Linux host (`archnoir`) connected on `10.213.207.51` over Wi-Fi.
+  * Bidirectional discovery verified: Linux discovered `RMX3870 (Ferry)` at `10.213.207.31:53770`, Android discovered and rendered `archnoir (Ferry)` at `10.213.207.51:53770`.
+  * Verified service stop/removal handling, service restart rediscovery, and app restart rediscovery with zero duplicates.
 
 ---
 
@@ -46,11 +52,11 @@ This document is the primary persistent context file for **Ferry**. It reflects 
 
 * **Host OS**: Arch Linux x86_64 (Linux 7.1.9-arch1-2)
 * **Desktop Environment**: GNOME Shell 50.4 (Wayland)
-* **Python**: Python 3.14.7 (`gtk4`, `libadwaita`, `python-gobject` available)
+* **Python**: Python 3.14.7 (`gtk4`, `libadwaita`, `python-gobject`, `zeroconf` 0.151.1)
 * **Java**: OpenJDK 26.0.2.1 (`java-26-openjdk`)
 * **Android Toolchain**: Android SDK Platform 35/36 at `/home/sanjeet/Android/Sdk`, Build-Tools 35/36/37
 * **Gradle**: Gradle 9.4.1 with Android Gradle Plugin 8.8.2, Kotlin 2.1.10
-* **Connected Device**: Realme RMX3870 (Android 16 / SDK 36, Device ID `QO8L696L6LYLUC45`) via ADB
+* **Connected Physical Device**: Realme RMX3870 (Android 16 / SDK 36, Device ID `QO8L696L6LYLUC45`) via USB ADB & Wi-Fi
 
 ---
 
@@ -58,10 +64,10 @@ This document is the primary persistent context file for **Ferry**. It reflects 
 
 ### Linux
 ```bash
-# Run unit tests
-python3 -m unittest discover -s linux/tests -v
+# Run all unit and integration tests (20 tests)
+PYTHONPATH=linux/src python3 -m unittest discover -s linux/tests -v
 
-# Run desktop UI
+# Run desktop UI with discovery active
 PYTHONPATH=linux/src python3 -m ferry_linux
 
 # Run headless daemon service
@@ -85,16 +91,15 @@ adb shell am start -n dev.ferry.app/.MainActivity
 
 ---
 
-## 6. Known Limitations & Phase 1 Boundary
+## 6. Known Limitations & Phase Boundary
 
-* **No Active Discovery**: mDNS discovery will be implemented in Phase 2.
-* **No Active Pairing**: SAS cryptographic exchange will be implemented in Phase 2.
-* **No File Transfer Engine**: Binary streaming, chunking, and SAF I/O will be implemented in Phase 3.
+* **No Cryptographic Pairing (Phase 2B/2C)**: Discovered peers are strictly untrusted. SAS numeric PIN exchange and key storage are scheduled for Phase 2B/2C.
+* **No File Transfer Engine (Phase 3)**: Data streaming channels and SAF file I/O will follow after pairing.
 
 ---
 
 ## 7. Next Recommended Task
 
-* **Phase 2: Local Discovery & Cryptographic Pairing**
-  * Implement mDNS announcer & listener (`zeroconf` on Linux, `NsdManager` on Android).
-  * Implement cryptographic handshake with Ed25519 / X25519 and SAS numeric PIN comparison UI on both GNOME and Android Compose.
+* **Phase 2B: Control Plane Connection & Handshake Architecture**
+  * Establish authenticated TCP control channel over TLS 1.3 / Noise protocol.
+  * Implement ephemeral X25519 key exchange between discovered peers.

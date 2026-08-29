@@ -6,9 +6,10 @@ from __future__ import annotations
 
 import sqlite3
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
+from typing import Generator, List, Optional
 
 
 @dataclass
@@ -40,15 +41,19 @@ class DatabaseManager:
         self.db_path = db_path
         self._init_db()
 
-    def _get_connection(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connection(self) -> Generator[sqlite3.Connection, None, None]:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
-        return conn
+        try:
+            yield conn
+        finally:
+            conn.close()
 
     def _init_db(self) -> None:
         """Create database schema if not exists."""
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        with self._get_connection() as conn:
+        with self._connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS trusted_devices (
@@ -82,7 +87,7 @@ class DatabaseManager:
             conn.commit()
 
     def add_or_update_device(self, device: TrustedDevice) -> None:
-        with self._get_connection() as conn:
+        with self._connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
                 INSERT INTO trusted_devices (device_id, device_name, public_key, paired_at, last_seen)
@@ -95,7 +100,7 @@ class DatabaseManager:
             conn.commit()
 
     def get_device(self, device_id: str) -> Optional[TrustedDevice]:
-        with self._get_connection() as conn:
+        with self._connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM trusted_devices WHERE device_id = ?", (device_id,))
             row = cursor.fetchone()
@@ -110,7 +115,7 @@ class DatabaseManager:
             )
 
     def list_devices(self) -> List[TrustedDevice]:
-        with self._get_connection() as conn:
+        with self._connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM trusted_devices ORDER BY last_seen DESC")
             return [
@@ -125,13 +130,13 @@ class DatabaseManager:
             ]
 
     def remove_device(self, device_id: str) -> None:
-        with self._get_connection() as conn:
+        with self._connection() as conn:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM trusted_devices WHERE device_id = ?", (device_id,))
             conn.commit()
 
     def add_transfer(self, record: TransferRecord) -> None:
-        with self._get_connection() as conn:
+        with self._connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
                 INSERT INTO transfer_history (
@@ -147,7 +152,7 @@ class DatabaseManager:
             conn.commit()
 
     def list_transfers(self, limit: int = 50) -> List[TransferRecord]:
-        with self._get_connection() as conn:
+        with self._connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM transfer_history ORDER BY started_at DESC LIMIT ?", (limit,))
             return [

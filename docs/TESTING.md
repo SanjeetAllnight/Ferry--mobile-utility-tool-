@@ -28,33 +28,41 @@ This document outlines the testing strategy, test layers, and verification comma
   * `test_config.py`: Verifies XDG configuration directory resolution, default values, and JSON persistence.
   * `test_db.py`: Verifies SQLite schema creation, migrations, and CRUD operations for trusted devices and transfer history.
   * `test_protocol_models.py`: Verifies protocol v1 binary framing (`FY` magic bytes + uint32 length header) and JSON envelope serialization/deserialization.
+  * `test_discovery_models.py`: Verifies TXT property decoding, IP address parsing, and protocol version compatibility.
+  * `test_discovery_manager.py`: Verifies `DiscoveryManager` listener callbacks, service state transitions (Add/Update/Remove), and self-suppression.
+  * `test_discovery_integration.py`: Live local mDNS announcement and discovery loopback test using `AsyncZeroconf`.
 
 ```bash
-# Run all Linux tests
-python3 -m unittest discover -s linux/tests -v
+# Run all Linux tests (20 tests)
+PYTHONPATH=linux/src python3 -m unittest discover -s linux/tests -v
 ```
 
 ### 2.2. Android Tests (`android/app/src/test/`)
 * **Framework**: JUnit 4 / Kotlin Test Runner.
 * **Test Modules**:
   * `ProtocolConstantsTest.kt`: Verifies protocol version constants, message types, and schema contracts matching Linux models.
+  * `DiscoveredDeviceTest.kt`: Verifies TXT attribute parsing, host validation, protocol version checks, and null safety.
 
 ```bash
 # Run Android local unit tests
 cd android && ./gradlew testDebugUnitTest
 ```
 
-### 2.3. Future Integration & End-to-End Testing (Phase 2+)
-* **IPC Loopback Test**: Launch headless Ferry service, connect mock UI client over UNIX domain socket, verify event delivery.
-* **Local Loopback Transfer Test**: Launch mock sender and receiver on localhost, transmit file, verify SHA-256 digest match.
-* **ADB Device E2E Test**: Scripted test initiating transfer between Arch host and physical Android device via ADB reverse/Wi-Fi.
+### 2.3. Physical End-to-End Discovery Verification (Phase 2A Verified)
+1. Both Arch Linux host (`10.213.207.51`) and Android physical device (`10.213.207.31`) connected to the same Wi-Fi subnet.
+2. Android app registers `Ferry-<id>` via `NsdManager` with TXT records.
+3. Linux daemon discovers `RMX3870 (Ferry)` at `10.213.207.31:53770`.
+4. Linux daemon registers `Ferry-<id>` via `AsyncZeroconf` with local network IPs.
+5. Android app resolves `archnoir (Ferry)` at `10.213.207.51:53770` and renders "Nearby Devices (Untrusted)".
+6. Verified lifecycle: stopping Linux service updates Android UI to "Searching Local Network...", restarting Linux service re-discovers in ~50ms, restarting Android app maintains clean single-entry state without duplicates.
 
 ---
 
 ## 3. Pre-Commit / Pre-Release Verification Checklist
 
 Every AI agent or developer must verify the following before concluding tasks:
-1. `python3 -m unittest discover -s linux/tests -v` exits with code `0`.
+1. `PYTHONPATH=linux/src python3 -m unittest discover -s linux/tests -v` exits with code `0`.
 2. `python3 -m compileall linux/src linux/tests` produces no syntax errors.
 3. `cd android && ./gradlew testDebugUnitTest` exits with code `0`.
 4. `cd android && ./gradlew assembleDebug` successfully produces a valid APK.
+5. If physical device is connected, verify live ADB installation and logcat output.

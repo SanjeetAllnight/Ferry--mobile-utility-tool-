@@ -52,14 +52,16 @@ Every control message uses the following top-level JSON structure:
 
 ### 3.1. Discovery (mDNS / DNS-SD)
 
-* **Service Type**: `_ferry._tcp.local.`
+* **Service Type**: `_ferry._tcp.local.` (Linux mDNS) / `_ferry._tcp` (Android NsdManager)
 * **Default Port**: `53770`
-* **TXT Records**:
-  * `v=1` (Protocol version)
-  * `id=<base64_device_public_id>`
-  * `name=<display_name>`
-  * `device_type=desktop|mobile`
-  * `os=archlinux|android`
+* **TXT Records (Key=Value UTF-8 Strings)**:
+  * `v=1` (*integer string, mandatory*): Protocol version.
+  * `id=<device_uuid>` (*string, UUIDv4, mandatory*): Stable device identifier.
+  * `name=<display_name>` (*string, mandatory*): User-facing device name.
+  * `type=desktop|mobile` (*string, mandatory*): Device form factor.
+  * `os=archlinux|android` (*string, mandatory*): Operating system identifier.
+  * `port=<listen_port>` (*integer string, mandatory*): Control plane TCP port.
+  * `app_version=<semver>` (*string, optional*): Application release version.
 
 ---
 

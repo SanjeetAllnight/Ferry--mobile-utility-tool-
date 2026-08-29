@@ -12,11 +12,14 @@ from pathlib import Path
 from typing import Any, Dict
 
 
+import uuid
+
+
 @dataclass
 class FerryConfig:
     """Ferry configuration settings."""
     device_name: str = field(default_factory=lambda: f"{socket.gethostname()} (Ferry)")
-    device_id: str = ""
+    device_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     listen_port: int = 53770
     download_dir: str = field(default_factory=lambda: str(Path.home() / "Downloads" / "Ferry"))
     auto_accept_paired: bool = False
@@ -77,9 +80,15 @@ class ConfigManager:
         try:
             with open(self.config_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                return FerryConfig.from_dict(data)
+                config = FerryConfig.from_dict(data)
+                if not config.device_id:
+                    config.device_id = str(uuid.uuid4())
+                    self.save_config(config)
+                return config
         except Exception:
-            return FerryConfig()
+            config = FerryConfig()
+            self.save_config(config)
+            return config
 
     def save_config(self, config: FerryConfig) -> None:
         """Save configuration to disk."""

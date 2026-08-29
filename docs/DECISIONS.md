@@ -95,3 +95,24 @@ Both ends need persistent storage for trusted peer identities, transfer history,
 
 ### Consequences
 * Reliable, transactional storage that survives application restarts and power loss.
+
+---
+
+## ADR 006: Local Device Discovery via mDNS / DNS-SD (AsyncZeroconf & NsdManager)
+
+### Context
+Ferry requires automatic peer discovery across local Wi-Fi / LAN without cloud relays, centralized servers, or manual IP entry.
+
+### Decision
+* Use DNS-SD / Multicast DNS (mDNS) with service type `_ferry._tcp.local.` (Linux) and `_ferry._tcp` (Android).
+* **Linux**: Integrate `AsyncZeroconf` directly into the `FerryService` asyncio event loop for service registration, browsing, and resolution.
+* **Android**: Use Android's native `NsdManager` with MulticastLock management for background/foreground battery safety.
+* Discovery metadata in TXT records includes `v=1`, `id=<UUID>`, `name`, `type`, `os`, `port`, and `app_version`.
+* Stable `id` (UUIDv4) is used for in-memory deduplication. Discovered IP addresses are treated purely as ephemeral transport endpoints and are never stored as permanent identity.
+
+### Alternatives Considered
+* *UDP Broadcast on custom port*: Subject to firewall blocks and lacks standard OS-level service naming and TXT metadata handling.
+* *Bluetooth Low Energy (BLE) Discovery*: Higher battery drain, requires additional Bluetooth permissions/hardware, and unnecessary when Wi-Fi is already required for high-speed file transfers.
+
+### Consequences
+* Fast, native peer discovery across Arch Linux and Android on standard Wi-Fi subnets with zero external dependencies. Discovered devices remain unauthenticated until explicit pairing in Phase 2C.
