@@ -8,7 +8,7 @@ This document is the primary persistent context file for **Ferry**. It reflects 
 
 * **Current Phase**: **Phase 2B — Secure Control Plane & Cryptographic Handshake (COMPLETE / VERIFIED)**
 * **Current Milestone**: **M2.1 (Ed25519/X25519 HKDF AEAD Control Plane — Verified)**
-* **Project Status**: Phase 2B is completely implemented and factually verified. Linux and Android sides successfully perform mutual cryptographic handshakes, derive matching SAS codes, and establish ChaCha20-Poly1305 AEAD sessions over loopback and physical Wi-Fi. 53 Linux tests pass, Android unit tests pass, and debug APK builds cleanly. Detailed audit available in `docs/PHASE_2B_AUDIT.md`.
+* **Project Status**: Phase 2B is completely implemented and factually verified. Linux and Android sides successfully perform mutual cryptographic handshakes, derive matching SAS codes, and establish ChaCha20-Poly1305 AEAD sessions over loopback and physical Wi-Fi. 53 Linux tests pass, Android unit tests pass, and debug APK builds cleanly. Detailed audit available in `docs/PHASE_2B_AUDIT.md` and independent security review in `docs/PHASE_2B.1_SECURITY_REVIEW.md`.
 
 ---
 
@@ -26,7 +26,7 @@ This document is the primary persistent context file for **Ferry**. It reflects 
 ## 3. Implemented & Verified Functionality
 
 * [x] **Project Repository & Configuration**: Standardized structure, `.gitignore`, `README.md`, and agent operating manual (`AGENTS.md`).
-* [x] **Comprehensive Documentation Suite**: `ARCHITECTURE.md`, `PROTOCOL.md`, `SECURITY.md`, `DEVELOPMENT.md`, `TESTING.md`, `DECISIONS.md`, `PROJECT_STATE.md`, and `PHASE_2B_AUDIT.md`.
+* [x] **Comprehensive Documentation Suite**: `ARCHITECTURE.md`, `PROTOCOL.md`, `SECURITY.md`, `DEVELOPMENT.md`, `TESTING.md`, `DECISIONS.md`, `PROJECT_STATE.md`, `PHASE_2B_AUDIT.md`, and `PHASE_2B.1_SECURITY_REVIEW.md`.
 * [x] **Linux Discovery Subsystem (`linux/src/ferry_linux/core/discovery.py`)**:
   * `AsyncZeroconf` service advertisement with dynamic local IP enumeration and standard Ferry TXT attributes.
   * `AsyncServiceBrowser` and `AsyncServiceInfo` peer resolution.
