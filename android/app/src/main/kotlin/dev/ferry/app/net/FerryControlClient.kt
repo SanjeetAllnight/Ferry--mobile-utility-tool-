@@ -233,15 +233,27 @@ class FerryControlClient(
             _sessionState.value = FerrySession.State.ESTABLISHED
         }
         
-        val payload = JSONObject().apply { put("decision", "ACCEPT") }
-        sendEncrypted(sess, ProtocolConstants.MessageTypes.PAIR_DECISION, payload)
+        scope.launch {
+            try {
+                val payload = JSONObject().apply { put("decision", "ACCEPT") }
+                sendEncrypted(sess, ProtocolConstants.MessageTypes.PAIR_DECISION, payload)
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to send pairing acceptance", e)
+            }
+        }
     }
 
     fun rejectPairing() {
         val sess = session ?: return
         Log.i(TAG, "User rejected pairing")
-        val payload = JSONObject().apply { put("decision", "REJECT") }
-        sendEncrypted(sess, ProtocolConstants.MessageTypes.PAIR_DECISION, payload)
+        scope.launch {
+            try {
+                val payload = JSONObject().apply { put("decision", "REJECT") }
+                sendEncrypted(sess, ProtocolConstants.MessageTypes.PAIR_DECISION, payload)
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to send pairing rejection", e)
+            }
+        }
         
         try { sess.transition(FerrySession.State.FAILED) } catch (_: Exception) {}
         _sessionState.value = FerrySession.State.FAILED

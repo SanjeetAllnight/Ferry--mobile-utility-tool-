@@ -4,11 +4,13 @@ This document is the primary persistent context file for **Ferry**. It reflects 
 
 ---
 
-## 1. Project Phase & Milestone
+### Current Phase: Phase 3 (File Transfer Execution)
+**Status:** In Development
+**Goal:** Implement file transfer capabilities between paired devices.
 
-* **Current Phase**: **Phase 2C — Interactive Trust & Pairing UX (COMPLETE / VERIFIED)**
-* **Current Milestone**: **M2.2 (Interactive Trust & Android KeyStore — Verified)**
-* **Project Status**: Phase 2C is completely implemented. Linux and Android now support an interactive pairing flow requiring explicit user acceptance. Android securely stores Ed25519 identity keys in the AndroidKeyStore using hardware backing. Linux stores trusted devices in an SQLite database. Both clients have proper UX for pairing, including displaying the SAS code and allowing users to Accept or Reject. All Linux and Android tests pass cleanly.
+### Previous Phase: Phase 2C (Interactive Trust & Identity Storage)
+**Status:** Complete
+**Goal:** Physical verification of pairing flow, SAS exchange, connection transitions, and Android key storage. Linux and Android now support an interactive pairing flow requiring explicit user acceptance. Android securely stores Ed25519 identity keys in the AndroidKeyStore using hardware backing. Linux stores trusted devices in an SQLite database. Both clients have proper UX for pairing, including displaying the SAS code and allowing users to Accept or Reject. All Linux and Android tests pass cleanly.
 
 ---
 

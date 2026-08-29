@@ -91,6 +91,7 @@ class FerryIdentity(context: Context) {
             // Android's X.509 encoding for Ed25519 has a 12-byte header;
             // the raw key is the last 32 bytes.
             val encoded = keyPair.public.encoded
+            Log.d(TAG, "public.encoded size: ${encoded.size}, hex: ${encoded.joinToString("") { "%02x".format(it) }}")
             return encoded.takeLast(32).toByteArray()
         }
 
@@ -121,12 +122,12 @@ class FerryIdentity(context: Context) {
         val ks = KeyStore.getInstance("AndroidKeyStore")
         ks.load(null)
 
-        if (ks.containsAlias("ferry_identity_key")) {
-            val entry = ks.getEntry("ferry_identity_key", null) as KeyStore.PrivateKeyEntry
+        if (ks.containsAlias("ferry_identity_ed25519_v3")) {
+            val entry = ks.getEntry("ferry_identity_ed25519_v3", null) as KeyStore.PrivateKeyEntry
             try {
                 val factory = KeyFactory.getInstance(entry.privateKey.algorithm, "AndroidKeyStore")
                 val keyInfo = factory.getKeySpec(entry.privateKey, KeyInfo::class.java)
-                Log.i(TAG, "Loaded Ed25519 from AndroidKeyStore (Hardware backed: ${keyInfo.isInsideSecureHardware})")
+                Log.i(TAG, "Loaded Ed25519 from AndroidKeyStore")
             } catch (e: Exception) {
                 Log.w(TAG, "Could not check hardware backing status: ${e.message}")
             }
@@ -135,25 +136,58 @@ class FerryIdentity(context: Context) {
 
         // Clean up legacy keys from SharedPreferences
         if (prefs.contains(KEY_PRIVATE)) {
-            Log.w(TAG, "Legacy software-backed identity found. Discarding and generating new hardware-backed key.")
-            prefs.edit().remove(KEY_PRIVATE).remove(KEY_PUBLIC).apply()
+            Log.w(TAG, "Legacy software-backed identity found.")
+            // We will load this if hardware fails. But for now, we try to use hardware if available.
         }
 
         return generateAndSaveKeyPair()
     }
 
     private fun generateAndSaveKeyPair(): KeyPair {
-        Log.i(TAG, "Generating new hardware-backed Ed25519 identity...")
-        val kpg = KeyPairGenerator.getInstance("Ed25519", "AndroidKeyStore")
-        val spec = KeyGenParameterSpec.Builder(
-            "ferry_identity_key",
-            KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY
-        ).build()
+        try {
+            Log.i(TAG, "Generating new hardware-backed Ed25519 identity...")
+            val kpg = KeyPairGenerator.getInstance("Ed25519", "AndroidKeyStore")
+            val spec = KeyGenParameterSpec.Builder(
+                "ferry_identity_ed25519_v3",
+                KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY
+            ).build()
+            
+            kpg.initialize(spec)
+            val kp = kpg.generateKeyPair()
+            
+            if (kp.public.encoded.size == 44) {
+                Log.i(TAG, "Hardware Ed25519 generated successfully. Public key: ${publicKeyBytesToB64(kp.public)}...")
+                prefs.edit().remove(KEY_PRIVATE).remove(KEY_PUBLIC).apply()
+                return kp
+            } else {
+                Log.w(TAG, "OEM Bug Detected: AndroidKeyStore generated an invalid Ed25519 key (size: ${kp.public.encoded.size}). Deleting and falling back to software.")
+                val ks = KeyStore.getInstance("AndroidKeyStore")
+                ks.load(null)
+                ks.deleteEntry("ferry_identity_ed25519_v3")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Hardware Ed25519 generation failed: ${e.message}. Falling back to software.")
+        }
         
-        kpg.initialize(spec)
+        Log.i(TAG, "Generating software-backed Ed25519 identity...")
+        if (prefs.contains(KEY_PRIVATE) && prefs.contains(KEY_PUBLIC)) {
+            Log.i(TAG, "Loading existing software identity.")
+            val privBytes = decodeB64(prefs.getString(KEY_PRIVATE, "")!!)
+            val pubBytes = decodeB64(prefs.getString(KEY_PUBLIC, "")!!)
+            val kf = KeyFactory.getInstance("Ed25519")
+            val priv = kf.generatePrivate(java.security.spec.PKCS8EncodedKeySpec(privBytes))
+            val pub = kf.generatePublic(java.security.spec.X509EncodedKeySpec(pubBytes))
+            return KeyPair(pub, priv)
+        }
+        
+        val kpg = KeyPairGenerator.getInstance("Ed25519") // Default Conscrypt software provider
         val kp = kpg.generateKeyPair()
-
-        Log.i(TAG, "Generated new Ed25519 identity. Public key: ${publicKeyBytesToB64(kp.public)}...")
+        prefs.edit()
+            .putString(KEY_PRIVATE, Base64.encodeToString(kp.private.encoded, Base64.URL_SAFE or Base64.NO_WRAP))
+            .putString(KEY_PUBLIC, Base64.encodeToString(kp.public.encoded, Base64.URL_SAFE or Base64.NO_WRAP))
+            .apply()
+            
+        Log.i(TAG, "Generated software Ed25519 identity. Public key: ${publicKeyBytesToB64(kp.public)}...")
         return kp
     }
 
