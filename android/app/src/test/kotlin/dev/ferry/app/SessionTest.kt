@@ -206,8 +206,11 @@ class SessionTest {
         val s = FerrySession(isInitiator = true)
         s.transition(FerrySession.State.CONNECTING)
         s.transition(FerrySession.State.HANDSHAKING)
-        s.transition(FerrySession.State.PAIRING)
         s.transition(FerrySession.State.AUTHENTICATING)
+        s.transition(FerrySession.State.PAIRING)
+        s.transition(FerrySession.State.WAITING_FOR_LOCAL_DECISION)
+        s.transition(FerrySession.State.WAITING_FOR_REMOTE_DECISION)
+        s.transition(FerrySession.State.PAIR_ACCEPTED)
         s.transition(FerrySession.State.ESTABLISHED)
     }
 

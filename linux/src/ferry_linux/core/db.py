@@ -199,6 +199,12 @@ class DatabaseManager:
             cursor.execute("DELETE FROM trusted_devices WHERE device_id = ?", (device_id,))
             conn.commit()
 
+    def remove_device_by_public_key(self, identity_public_key_b64: str) -> None:
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM trusted_devices WHERE identity_public_key_b64 = ?", (identity_public_key_b64,))
+            conn.commit()
+
     def add_transfer(self, record: TransferRecord) -> None:
         with self._connection() as conn:
             cursor = conn.cursor()

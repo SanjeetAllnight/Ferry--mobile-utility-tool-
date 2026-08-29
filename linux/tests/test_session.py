@@ -225,8 +225,11 @@ class TestFerrySessionStateMachine(unittest.TestCase):
         s = FerrySession(is_initiator=True)
         s.transition(SessionState.CONNECTING)
         s.transition(SessionState.HANDSHAKING)
-        s.transition(SessionState.PAIRING)
         s.transition(SessionState.AUTHENTICATING)
+        s.transition(SessionState.PAIRING)
+        s.transition(SessionState.WAITING_FOR_LOCAL_DECISION)
+        s.transition(SessionState.WAITING_FOR_REMOTE_DECISION)
+        s.transition(SessionState.PAIR_ACCEPTED)
         s.transition(SessionState.ESTABLISHED)
 
 

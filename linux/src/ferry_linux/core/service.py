@@ -108,6 +108,60 @@ class FerryService:
             except Exception as exc:
                 logger.error("Session listener error: %s", exc)
 
+    async def accept_pairing(self, remote_addr: str) -> None:
+        """User clicked Accept in the pairing dialog."""
+        ps = self._active_sessions.get(remote_addr)
+        if not ps:
+            return
+        logger.info("Local user accepted pairing with %s", ps.remote_device_name)
+        
+        if ps.session.state == SessionState.PAIRING:
+            ps.session.transition(SessionState.WAITING_FOR_REMOTE_DECISION)
+        elif ps.session.state == SessionState.WAITING_FOR_LOCAL_DECISION:
+            ps.session.transition(SessionState.PAIR_ACCEPTED)
+            self._persist_trust(ps)
+            ps.session.transition(SessionState.ESTABLISHED)
+        
+        self._notify_session_change(ps.remote_addr, ps.session.state)
+        await self.send_encrypted(ps, MessageType.PAIR_DECISION, {"decision": "ACCEPT"})
+
+    async def reject_pairing(self, remote_addr: str) -> None:
+        """User clicked Reject in the pairing dialog."""
+        ps = self._active_sessions.get(remote_addr)
+        if not ps:
+            return
+        logger.info("Local user rejected pairing with %s", ps.remote_device_name)
+        try:
+            await self.send_encrypted(ps, MessageType.PAIR_DECISION, {"decision": "REJECT"})
+        except Exception:
+            pass
+        self._disconnect_session(ps)
+
+    def _persist_trust(self, ps: PeerSession) -> None:
+        """Persist trust for a paired peer."""
+        now = int(time.time() * 1000)
+        self.db.add_or_update_device(TrustedDevice(
+            device_id=ps.remote_device_id or str(uuid.uuid4()),
+            device_name=ps.remote_device_name or "Unknown",
+            public_key=ps.remote_static_pub_b64,
+            identity_public_key_b64=ps.remote_static_pub_b64,
+            paired_at=now,
+            last_seen=now,
+        ))
+        logger.info("Trust persisted for peer %s", ps.remote_device_name)
+
+    def _disconnect_session(self, ps: PeerSession) -> None:
+        if ps.session.state not in (SessionState.DISCONNECTED, SessionState.FAILED):
+            try:
+                ps.session.transition(SessionState.FAILED)
+            except Exception:
+                pass
+        self._notify_session_change(ps.remote_addr, ps.session.state)
+        try:
+            ps.writer.close()
+        except Exception:
+            pass
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -321,35 +375,9 @@ class FerryService:
             derived = session.derive_keys()
             sas = session.sas_code
 
-            # Check if peer is already trusted
-            trusted = self.db.get_device_by_public_key(remote_static_b64)
-            is_paired = trusted is not None
+            # Transition to AUTHENTICATING to verify signatures first
+            session.transition(SessionState.AUTHENTICATING)
 
-            if is_paired:
-                session.transition(SessionState.AUTHENTICATING)
-                logger.info(
-                    "Known peer %s (%s) — proceeding to authentication",
-                    ps.remote_device_name, ps.remote_device_id
-                )
-            else:
-                session.transition(SessionState.PAIRING)
-                logger.info(
-                    "New peer %s — SAS: %s  (auto-accepting for Phase 2B; full UI in Phase 2C)",
-                    ps.remote_device_name, sas
-                )
-                # Phase 2B: auto-accept for testing; Phase 2C will show GNOME dialog
-                # Persist trust immediately after SAS (simulated user acceptance)
-                now = int(time.time() * 1000)
-                self.db.add_or_update_device(TrustedDevice(
-                    device_id=ps.remote_device_id or str(uuid.uuid4()),
-                    device_name=ps.remote_device_name or "Unknown",
-                    public_key=remote_static_b64,
-                    identity_public_key_b64=remote_static_b64,
-                    paired_at=now,
-                    last_seen=now,
-                ))
-                logger.info("Peer %s trusted and persisted (SAS: %s)", ps.remote_device_name, sas)
-                session.transition(SessionState.AUTHENTICATING)
 
             # --- Step 3: Mutual Ed25519 authentication over transcript ---
             transcript = session.build_auth_transcript()
@@ -387,10 +415,12 @@ class FerryService:
 
             logger.info("Auth verified for %s", ps.remote_device_name)
 
-            # Update last_seen
-            now = int(time.time() * 1000)
+            # Check if peer is already trusted
             existing = self.db.get_device_by_public_key(remote_static_b64)
-            if existing:
+            is_paired = existing is not None
+            now = int(time.time() * 1000)
+
+            if is_paired:
                 self.db.add_or_update_device(TrustedDevice(
                     device_id=existing.device_id,
                     device_name=existing.device_name,
@@ -399,18 +429,24 @@ class FerryService:
                     paired_at=existing.paired_at,
                     last_seen=now,
                 ))
+                session.transition(SessionState.ESTABLISHED)
+                self._active_sessions[ps.remote_addr] = ps
+                self._notify_session_change(ps.remote_addr, SessionState.ESTABLISHED)
+                logger.info("Session ESTABLISHED with %s (%s)", ps.remote_device_name, ps.remote_addr)
 
-            session.transition(SessionState.ESTABLISHED)
-            self._active_sessions[ps.remote_addr] = ps
-            self._notify_session_change(ps.remote_addr, SessionState.ESTABLISHED)
-            logger.info("Session ESTABLISHED with %s (%s)", ps.remote_device_name, ps.remote_addr)
-
-            # Signal handshake completion to connect_to_peer waiter (if any)
-            if handshake_done is not None:
-                handshake_done.set()
-
-            # --- Step 4: Encrypted session loop ---
-            await self._run_session_loop(ps)
+                if handshake_done is not None:
+                    handshake_done.set()
+                await self._run_session_loop(ps)
+            else:
+                session.transition(SessionState.PAIRING)
+                self._active_sessions[ps.remote_addr] = ps
+                self._notify_session_change(ps.remote_addr, SessionState.PAIRING)
+                logger.info("New peer %s — Requesting pairing, SAS: %s", ps.remote_device_name, sas)
+                
+                # Signal handshake done so the connection setup completes, but loop handles pairing
+                if handshake_done is not None:
+                    handshake_done.set()
+                await self._run_session_loop(ps)
 
         except asyncio.CancelledError:
             logger.info("Session with %s cancelled", ps.remote_addr)
@@ -462,6 +498,22 @@ class FerryService:
                 if envelope.type == MessageType.DISCONNECT:
                     logger.info("Peer %s sent DISCONNECT", ps.remote_addr)
                     break
+                    
+                if envelope.type == MessageType.PAIR_DECISION:
+                    decision = envelope.payload.get("decision")
+                    logger.info("Received PAIR_DECISION: %s from %s", decision, ps.remote_device_name)
+                    if decision == "REJECT":
+                        logger.warning("Peer %s rejected pairing", ps.remote_device_name)
+                        break
+                    if decision == "ACCEPT":
+                        if ps.session.state == SessionState.PAIRING:
+                            ps.session.transition(SessionState.WAITING_FOR_LOCAL_DECISION)
+                        elif ps.session.state == SessionState.WAITING_FOR_REMOTE_DECISION:
+                            ps.session.transition(SessionState.PAIR_ACCEPTED)
+                            self._persist_trust(ps)
+                            ps.session.transition(SessionState.ESTABLISHED)
+                        self._notify_session_change(ps.remote_addr, ps.session.state)
+                    continue
 
                 logger.debug("Received encrypted message type=%s from %s", envelope.type, ps.remote_addr)
                 # Future: route to transfer handler etc.
@@ -520,9 +572,9 @@ class FerryService:
         return header + rest
 
     async def send_encrypted(self, ps: PeerSession, msg_type: MessageType, payload: dict) -> None:
-        """Send an encrypted Ferry envelope to an ESTABLISHED session peer."""
-        if ps.state != SessionState.ESTABLISHED:
-            raise RuntimeError(f"Cannot send to session in state {ps.state}")
+        """Send an encrypted Ferry envelope to an established or pairing session peer."""
+        if ps.state in (SessionState.DISCONNECTED, SessionState.CONNECTING, SessionState.HANDSHAKING, SessionState.FAILED, SessionState.CLOSING):
+            raise RuntimeError(f"Cannot send encrypted to session in state {ps.state}")
         envelope = FerryEnvelope(type=msg_type.value, payload=payload)
         plaintext = envelope.to_json().encode("utf-8")
         frame = ps.session.encrypt_frame(plaintext)

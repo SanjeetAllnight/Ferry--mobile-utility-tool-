@@ -11,6 +11,8 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, GLib, Gtk  # noqa: E402
 
 from ..core.discovery import DiscoveredDevice
+from ..core.session import SessionState
+import asyncio
 
 
 class FerryMainWindow(Adw.ApplicationWindow):
@@ -77,6 +79,13 @@ class FerryMainWindow(Adw.ApplicationWindow):
         proto_row.set_icon_name("dialog-password-symbolic")
         pref_group.add(proto_row)
 
+        # Trusted Devices Group
+        self.trusted_group = Adw.PreferencesGroup()
+        self.trusted_group.set_title("Trusted Devices")
+        self.trusted_group.set_description("Devices that have been paired with this computer")
+        content_box.append(self.trusted_group)
+        self._trusted_rows: list[Adw.ActionRow] = []
+
         # Discovered Devices Preferences Group
         self.devices_group = Adw.PreferencesGroup()
         self.devices_group.set_title("Nearby Ferry Devices (Untrusted)")
@@ -85,6 +94,46 @@ class FerryMainWindow(Adw.ApplicationWindow):
 
         self._device_rows: list[Adw.ActionRow] = []
         self._set_empty_devices_state()
+        GLib.idle_add(self._update_trusted_devices)
+
+    def _update_trusted_devices(self) -> bool:
+        app = self.get_application()
+        if not app or not app.service:
+            return False
+
+        for row in self._trusted_rows:
+            self.trusted_group.remove(row)
+        self._trusted_rows.clear()
+
+        devices = app.service.db.list_devices()
+        if not devices:
+            empty_row = Adw.ActionRow()
+            empty_row.set_title("No trusted devices")
+            self.trusted_group.add(empty_row)
+            self._trusted_rows.append(empty_row)
+            return False
+
+        for dev in devices:
+            row = Adw.ActionRow()
+            row.set_title(dev.device_name)
+            row.set_subtitle(dev.device_id)
+            row.set_icon_name("phone-symbolic")
+
+            unpair_btn = Gtk.Button(label="Unpair")
+            unpair_btn.set_valign(Gtk.Align.CENTER)
+            unpair_btn.add_css_class("destructive-action")
+            unpair_btn.connect("clicked", lambda btn, d=dev: self._on_unpair_clicked(d))
+            row.add_suffix(unpair_btn)
+
+            self.trusted_group.add(row)
+            self._trusted_rows.append(row)
+        return False
+
+    def _on_unpair_clicked(self, dev) -> None:
+        app = self.get_application()
+        if app and app.service:
+            app.service.db.remove_device_by_public_key(dev.identity_public_key_b64)
+            self._update_trusted_devices()
 
     def _set_empty_devices_state(self) -> None:
         """Clear device rows and show empty placeholder."""
@@ -130,3 +179,40 @@ class FerryMainWindow(Adw.ApplicationWindow):
             return False
 
         GLib.idle_add(_update)
+
+    def handle_session_state(self, remote_addr: str, state: SessionState) -> None:
+        """Handle session state updates and trigger UI actions."""
+        app = self.get_application()
+        if not app or not app.service:
+            return
+
+        # Always update trusted devices list in case a session was established
+        if state == SessionState.ESTABLISHED:
+            self._update_trusted_devices()
+
+        if state == SessionState.PAIRING:
+            ps = app.service._active_sessions.get(remote_addr)
+            if not ps:
+                return
+
+            sas = ps.session.sas_code
+            dialog = Adw.MessageDialog(
+                heading=f"Pair with {ps.remote_device_name}?",
+                body=f"Verify that the following 6-digit code matches the one shown on {ps.remote_device_name}:\n\n<span size='xx-large' weight='bold'>{sas}</span>",
+                body_use_markup=True
+            )
+            dialog.add_response("reject", "Reject")
+            dialog.add_response("accept", "Accept")
+            dialog.set_response_appearance("reject", Adw.ResponseAppearance.DESTRUCTIVE)
+            dialog.set_response_appearance("accept", Adw.ResponseAppearance.SUGGESTED)
+
+            def on_response(dlg, response_id):
+                loop = app.get_loop()
+                if response_id == "accept":
+                    asyncio.run_coroutine_threadsafe(app.service.accept_pairing(remote_addr), loop)
+                else:
+                    asyncio.run_coroutine_threadsafe(app.service.reject_pairing(remote_addr), loop)
+
+            dialog.connect("response", on_response)
+            dialog.present(self)
+

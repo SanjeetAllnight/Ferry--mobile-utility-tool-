@@ -47,6 +47,7 @@ class FerrySession(private val isInitiator: Boolean) {
 
     enum class State {
         DISCONNECTED, CONNECTING, HANDSHAKING, PAIRING,
+        WAITING_FOR_LOCAL_DECISION, WAITING_FOR_REMOTE_DECISION, PAIR_ACCEPTED,
         AUTHENTICATING, ESTABLISHED, CLOSING, FAILED
     }
 
@@ -275,9 +276,12 @@ class FerrySession(private val isInitiator: Boolean) {
         val valid = mapOf(
             State.DISCONNECTED to setOf(State.CONNECTING),
             State.CONNECTING to setOf(State.HANDSHAKING, State.FAILED),
-            State.HANDSHAKING to setOf(State.PAIRING, State.AUTHENTICATING, State.FAILED),
-            State.PAIRING to setOf(State.AUTHENTICATING, State.FAILED),
-            State.AUTHENTICATING to setOf(State.ESTABLISHED, State.FAILED),
+            State.HANDSHAKING to setOf(State.AUTHENTICATING, State.FAILED),
+            State.AUTHENTICATING to setOf(State.ESTABLISHED, State.PAIRING, State.FAILED),
+            State.PAIRING to setOf(State.WAITING_FOR_LOCAL_DECISION, State.WAITING_FOR_REMOTE_DECISION, State.FAILED),
+            State.WAITING_FOR_LOCAL_DECISION to setOf(State.WAITING_FOR_REMOTE_DECISION, State.PAIR_ACCEPTED, State.FAILED),
+            State.WAITING_FOR_REMOTE_DECISION to setOf(State.WAITING_FOR_LOCAL_DECISION, State.PAIR_ACCEPTED, State.FAILED),
+            State.PAIR_ACCEPTED to setOf(State.ESTABLISHED, State.FAILED),
             State.ESTABLISHED to setOf(State.CLOSING, State.FAILED),
             State.CLOSING to setOf(State.DISCONNECTED),
             State.FAILED to setOf(State.DISCONNECTED),

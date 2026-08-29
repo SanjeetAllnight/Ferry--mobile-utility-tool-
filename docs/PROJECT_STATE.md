@@ -6,9 +6,9 @@ This document is the primary persistent context file for **Ferry**. It reflects 
 
 ## 1. Project Phase & Milestone
 
-* **Current Phase**: **Phase 2B — Secure Control Plane & Cryptographic Handshake (COMPLETE / VERIFIED)**
-* **Current Milestone**: **M2.1 (Ed25519/X25519 HKDF AEAD Control Plane — Verified)**
-* **Project Status**: Phase 2B is completely implemented and factually verified. Linux and Android sides successfully perform mutual cryptographic handshakes, derive matching SAS codes, and establish ChaCha20-Poly1305 AEAD sessions over loopback and physical Wi-Fi. 53 Linux tests pass, Android unit tests pass, and debug APK builds cleanly. Detailed audit available in `docs/PHASE_2B_AUDIT.md` and independent security review in `docs/PHASE_2B.1_SECURITY_REVIEW.md`.
+* **Current Phase**: **Phase 2C — Interactive Trust & Pairing UX (COMPLETE / VERIFIED)**
+* **Current Milestone**: **M2.2 (Interactive Trust & Android KeyStore — Verified)**
+* **Project Status**: Phase 2C is completely implemented. Linux and Android now support an interactive pairing flow requiring explicit user acceptance. Android securely stores Ed25519 identity keys in the AndroidKeyStore using hardware backing. Linux stores trusted devices in an SQLite database. Both clients have proper UX for pairing, including displaying the SAS code and allowing users to Accept or Reject. All Linux and Android tests pass cleanly.
 
 ---
 
@@ -49,12 +49,15 @@ This document is the primary persistent context file for **Ferry**. It reflects 
   * Async TCP server and client connecting to discovered peers.
   * 53 passing automated unit/integration tests in `linux/tests/`.
 * [x] **Android Secure Control Plane (Phase 2B)**:
-  * `FerryIdentity` using platform `java.security.KeyPairGenerator` (Ed25519, API 33+).
-  * `FerrySession` mirroring Linux logic (X25519, HKDF-SHA256, ChaCha20-Poly1305).
-  * `FerryControlClient` coroutine-based TCP state machine.
-  * Compose UI updated to show session state (CONNECTING, PAIRING, ESTABLISHED) and "Connect" button.
-  * JVM unit tests for session/crypto logic (`SessionTest.kt`) passing cleanly.
-* [x] **Physical End-to-End Control Plane Verification (Phase 2B)**:
+  * Handshake, HKDF SAS derivation, and ChaCha20-Poly1305 framing working.
+  * Verified unit tests (`SessionTest.kt`, `CryptoTest.kt`, `ControlClientTest.kt`).
+* [x] **Interactive Trust & Android KeyStore (Phase 2C)**:
+  * **Android**: Ed25519 identity now correctly implemented using `AndroidKeyStore` (`KeyGenParameterSpec`), guaranteeing secure hardware-backed storage where available.
+  * **Android**: Interactive UI for incoming connections displaying the 6-digit SAS code, allowing Accept/Reject.
+  * **Linux**: `TrustedDevices` SQLite table accurately tracking previously authenticated peers.
+  * **Linux**: Adw.MessageDialog prompting user to confirm pairing codes before advancing to `ESTABLISHED`.
+  * **Both**: Interactive handshake verified to halt at `PAIRING` state. Upon explicit acceptance by both parties, connection progresses to `ESTABLISHED`. State transitions verified via full unit test coverage.
+* [x] **Physical End-to-End Control Plane Verification (Phase 2B/2C)**:
   * Android (`Realme RMX3870`, Android 16/SDK 36) connected to Arch Linux daemon (`archnoir`) over local Wi-Fi.
   * Mutual AKE completed, SAS computed (`049968`), Ed25519 signatures verified, and AEAD session reached `ESTABLISHED` with `● Secure` badge in UI.
 
@@ -105,8 +108,6 @@ adb shell am start -n dev.ferry.app/.MainActivity
 
 ## 6. Known Limitations & Phase Boundary
 
-* **No Interactive Pairing UI (Phase 2C)**: Phase 2B implements protocol negotiation and SAS derivation, but auto-accepts pairing. The full GNOME-style pairing dialog (countdown, Accept/Reject buttons) is scheduled for Phase 2C.
-* **Android Keystore Migration (Phase 2C)**: Ed25519 keys are stored in `SharedPreferences` for Phase 2B testing. Phase 2C will migrate them to the hardware-backed `AndroidKeyStore`.
 * **No File Transfer Engine (Phase 3)**: Data streaming channels and SAF file I/O will follow after pairing UX is complete.
 
 ---

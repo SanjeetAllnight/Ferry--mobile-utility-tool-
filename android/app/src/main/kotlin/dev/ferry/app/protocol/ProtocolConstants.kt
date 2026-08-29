@@ -23,6 +23,7 @@ object ProtocolConstants {
         const val HANDSHAKE_RESPONSE = "HANDSHAKE_RESPONSE"
         const val PAIR_REQUEST = "PAIR_REQUEST"
         const val PAIR_CONFIRM = "PAIR_CONFIRM"
+        const val PAIR_DECISION = "PAIR_DECISION"
 
         // File transfer
         const val TRANSFER_REQUEST = "TRANSFER_REQUEST"

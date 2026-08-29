@@ -62,6 +62,9 @@ class SessionState(Enum):
     CONNECTING = auto()
     HANDSHAKING = auto()
     PAIRING = auto()           # First-time: awaiting SAS user confirmation
+    WAITING_FOR_LOCAL_DECISION = auto()
+    WAITING_FOR_REMOTE_DECISION = auto()
+    PAIR_ACCEPTED = auto()
     AUTHENTICATING = auto()   # Known peer: verifying Ed25519 signatures
     ESTABLISHED = auto()
     CLOSING = auto()
@@ -365,9 +368,12 @@ class FerrySession:
         valid: dict[SessionState, set[SessionState]] = {
             SessionState.DISCONNECTED: {SessionState.CONNECTING},
             SessionState.CONNECTING: {SessionState.HANDSHAKING, SessionState.FAILED},
-            SessionState.HANDSHAKING: {SessionState.PAIRING, SessionState.AUTHENTICATING, SessionState.FAILED},
-            SessionState.PAIRING: {SessionState.AUTHENTICATING, SessionState.FAILED},
-            SessionState.AUTHENTICATING: {SessionState.ESTABLISHED, SessionState.FAILED},
+            SessionState.HANDSHAKING: {SessionState.AUTHENTICATING, SessionState.FAILED},
+            SessionState.AUTHENTICATING: {SessionState.ESTABLISHED, SessionState.PAIRING, SessionState.FAILED},
+            SessionState.PAIRING: {SessionState.WAITING_FOR_LOCAL_DECISION, SessionState.WAITING_FOR_REMOTE_DECISION, SessionState.FAILED},
+            SessionState.WAITING_FOR_LOCAL_DECISION: {SessionState.WAITING_FOR_REMOTE_DECISION, SessionState.PAIR_ACCEPTED, SessionState.FAILED},
+            SessionState.WAITING_FOR_REMOTE_DECISION: {SessionState.WAITING_FOR_LOCAL_DECISION, SessionState.PAIR_ACCEPTED, SessionState.FAILED},
+            SessionState.PAIR_ACCEPTED: {SessionState.ESTABLISHED, SessionState.FAILED},
             SessionState.ESTABLISHED: {SessionState.CLOSING, SessionState.FAILED},
             SessionState.CLOSING: {SessionState.DISCONNECTED},
             SessionState.FAILED: {SessionState.DISCONNECTED},

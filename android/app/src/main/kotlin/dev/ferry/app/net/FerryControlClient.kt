@@ -61,7 +61,12 @@ class FerryControlClient(
     val connectedDevice: StateFlow<DiscoveredDevice?> = _connectedDevice.asStateFlow()
 
     private val _sasCode = MutableStateFlow<String?>(null)
-    val sasCode: StateFlow<String?> = _sasCode.asStateFlow()
+    val sasCode: StateFlow<String?> = _sasCode
+
+    private var pendingPeerId: String? = null
+    private var pendingPeerName: String? = null
+    private var pendingPeerStaticB64: String? = null
+    private var activeOutput: OutputStream? = null
 
     private var socket: Socket? = null
     private var sessionJob: Job? = null
@@ -146,20 +151,9 @@ class FerryControlClient(
             val remoteDeviceName = remotePayload.optString("device_name", "")
             val remoteStaticBytes = FerryIdentity.decodeB64(remoteStaticB64)
 
-            val isTrusted = trustStore.isKnownPeer(remoteStaticB64)
-            if (isTrusted) {
-                sess.transition(FerrySession.State.AUTHENTICATING)
-                _sessionState.value = FerrySession.State.AUTHENTICATING
-                Log.i(TAG, "Known peer $remoteDeviceName — authenticating")
-            } else {
-                sess.transition(FerrySession.State.PAIRING)
-                _sessionState.value = FerrySession.State.PAIRING
-                Log.i(TAG, "New peer $remoteDeviceName — SAS: $sas (auto-accepting, Phase 2C will show UI)")
-                // Phase 2B: auto-accept pairing; persist trust
-                trustStore.persistTrust(remoteDeviceId, remoteDeviceName, remoteStaticB64)
-                sess.transition(FerrySession.State.AUTHENTICATING)
-                _sessionState.value = FerrySession.State.AUTHENTICATING
-            }
+            // Transition to AUTHENTICATING to exchange signatures first
+            sess.transition(FerrySession.State.AUTHENTICATING)
+            _sessionState.value = FerrySession.State.AUTHENTICATING
 
             // ── Step 4: Send AUTH_CHALLENGE (our signature) ──────────────
             val transcript = sess.buildAuthTranscript()
@@ -183,13 +177,24 @@ class FerryControlClient(
             }
             Log.i(TAG, "Auth verified for $remoteDeviceName")
 
-            // ── Step 6: ESTABLISHED ──────────────────────────────────────
-            sess.transition(FerrySession.State.ESTABLISHED)
-            _sessionState.value = FerrySession.State.ESTABLISHED
-            Log.i(TAG, "Session ESTABLISHED with $remoteDeviceName")
-
-            // ── Step 7: Encrypted session loop ───────────────────────────
-            runEncryptedSessionLoop(sess, input)
+            val isTrusted = trustStore.isKnownPeer(remoteStaticB64)
+            if (isTrusted) {
+                sess.transition(FerrySession.State.ESTABLISHED)
+                _sessionState.value = FerrySession.State.ESTABLISHED
+                Log.i(TAG, "Session ESTABLISHED with $remoteDeviceName")
+                runEncryptedSessionLoop(sess, input, output)
+            } else {
+                sess.transition(FerrySession.State.PAIRING)
+                _sessionState.value = FerrySession.State.PAIRING
+                Log.i(TAG, "New peer $remoteDeviceName — Requesting pairing, SAS: $sas")
+                
+                // Store peer data for persistence after accept
+                this@FerryControlClient.pendingPeerId = remoteDeviceId
+                this@FerryControlClient.pendingPeerName = remoteDeviceName
+                this@FerryControlClient.pendingPeerStaticB64 = remoteStaticB64
+                
+                runEncryptedSessionLoop(sess, input, output)
+            }
 
         } catch (e: CancellationException) {
             Log.i(TAG, "Session cancelled")
@@ -209,14 +214,68 @@ class FerryControlClient(
             }
             _sessionState.value = finalState
             _connectedDevice.value = null
+            activeOutput = null
         }
+    }
+
+    fun acceptPairing() {
+        val sess = session ?: return
+        if (sess.state != FerrySession.State.PAIRING && sess.state != FerrySession.State.WAITING_FOR_LOCAL_DECISION) return
+        Log.i(TAG, "User accepted pairing")
+        
+        if (sess.state == FerrySession.State.PAIRING) {
+            sess.transition(FerrySession.State.WAITING_FOR_REMOTE_DECISION)
+            _sessionState.value = FerrySession.State.WAITING_FOR_REMOTE_DECISION
+        } else if (sess.state == FerrySession.State.WAITING_FOR_LOCAL_DECISION) {
+            sess.transition(FerrySession.State.PAIR_ACCEPTED)
+            persistPendingTrust()
+            sess.transition(FerrySession.State.ESTABLISHED)
+            _sessionState.value = FerrySession.State.ESTABLISHED
+        }
+        
+        val payload = JSONObject().apply { put("decision", "ACCEPT") }
+        sendEncrypted(sess, ProtocolConstants.MessageTypes.PAIR_DECISION, payload)
+    }
+
+    fun rejectPairing() {
+        val sess = session ?: return
+        Log.i(TAG, "User rejected pairing")
+        val payload = JSONObject().apply { put("decision", "REJECT") }
+        sendEncrypted(sess, ProtocolConstants.MessageTypes.PAIR_DECISION, payload)
+        
+        try { sess.transition(FerrySession.State.FAILED) } catch (_: Exception) {}
+        _sessionState.value = FerrySession.State.FAILED
+        closeSocket()
+    }
+
+    private fun persistPendingTrust() {
+        if (pendingPeerId != null && pendingPeerName != null && pendingPeerStaticB64 != null) {
+            trustStore.persistTrust(pendingPeerId!!, pendingPeerName!!, pendingPeerStaticB64!!)
+            Log.i(TAG, "Trust persisted for $pendingPeerName")
+        }
+    }
+
+    private fun sendEncrypted(sess: FerrySession, type: String, payload: JSONObject) {
+        val out = activeOutput ?: return
+        val envelope = JSONObject().apply {
+            put("protocol_version", ProtocolConstants.PROTOCOL_VERSION)
+            put("message_id", UUID.randomUUID().toString())
+            put("reply_to", JSONObject.NULL)
+            put("type", type)
+            put("payload", payload)
+        }
+        val plaintext = envelope.toString().toByteArray(Charsets.UTF_8)
+        val frame = sess.encryptFrame(plaintext)
+        out.write(frame)
+        out.flush()
     }
 
     // ------------------------------------------------------------------
     // Encrypted session loop
     // ------------------------------------------------------------------
 
-    private fun runEncryptedSessionLoop(sess: FerrySession, input: InputStream) {
+    private fun runEncryptedSessionLoop(sess: FerrySession, input: InputStream, output: OutputStream) {
+        this.activeOutput = output
         try {
             while (true) {
                 val frameBytes = readAeadFrameBytes(input) ?: break
@@ -228,6 +287,27 @@ class FerryControlClient(
                     Log.i(TAG, "Peer sent DISCONNECT")
                     break
                 }
+                
+                if (type == ProtocolConstants.MessageTypes.PAIR_DECISION) {
+                    val decision = envelope.getJSONObject("payload").optString("decision")
+                    Log.i(TAG, "Received PAIR_DECISION: $decision")
+                    if (decision == "REJECT") {
+                        Log.w(TAG, "Peer rejected pairing")
+                        break
+                    } else if (decision == "ACCEPT") {
+                        if (sess.state == FerrySession.State.PAIRING) {
+                            sess.transition(FerrySession.State.WAITING_FOR_LOCAL_DECISION)
+                            _sessionState.value = FerrySession.State.WAITING_FOR_LOCAL_DECISION
+                        } else if (sess.state == FerrySession.State.WAITING_FOR_REMOTE_DECISION) {
+                            sess.transition(FerrySession.State.PAIR_ACCEPTED)
+                            persistPendingTrust()
+                            sess.transition(FerrySession.State.ESTABLISHED)
+                            _sessionState.value = FerrySession.State.ESTABLISHED
+                        }
+                    }
+                    continue
+                }
+
                 Log.d(TAG, "Received encrypted message: type=$type")
                 // Future: route to transfer handler
             }

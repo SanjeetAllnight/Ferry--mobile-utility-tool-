@@ -11,7 +11,10 @@ import java.security.PublicKey
 import java.security.Signature
 import java.security.spec.PKCS8EncodedKeySpec
 import java.security.spec.X509EncodedKeySpec
-
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyProperties
+import java.security.KeyStore
+import android.security.keystore.KeyInfo
 /**
  * FerryIdentity manages the device's long-term Ed25519 cryptographic identity keypair.
  *
@@ -115,42 +118,40 @@ class FerryIdentity(context: Context) {
     // ------------------------------------------------------------------
 
     private fun loadOrGenerateKeyPair(): KeyPair {
-        val privateB64 = prefs.getString(KEY_PRIVATE, null)
-        val publicB64 = prefs.getString(KEY_PUBLIC, null)
+        val ks = KeyStore.getInstance("AndroidKeyStore")
+        ks.load(null)
 
-        if (privateB64 != null && publicB64 != null) {
+        if (ks.containsAlias("ferry_identity_key")) {
+            val entry = ks.getEntry("ferry_identity_key", null) as KeyStore.PrivateKeyEntry
             try {
-                return loadKeyPair(privateB64, publicB64)
+                val factory = KeyFactory.getInstance(entry.privateKey.algorithm, "AndroidKeyStore")
+                val keyInfo = factory.getKeySpec(entry.privateKey, KeyInfo::class.java)
+                Log.i(TAG, "Loaded Ed25519 from AndroidKeyStore (Hardware backed: ${keyInfo.isInsideSecureHardware})")
             } catch (e: Exception) {
-                Log.w(TAG, "Failed to load identity keypair, generating new one: ${e.message}")
+                Log.w(TAG, "Could not check hardware backing status: ${e.message}")
             }
+            return KeyPair(entry.certificate.publicKey, entry.privateKey)
+        }
+
+        // Clean up legacy keys from SharedPreferences
+        if (prefs.contains(KEY_PRIVATE)) {
+            Log.w(TAG, "Legacy software-backed identity found. Discarding and generating new hardware-backed key.")
+            prefs.edit().remove(KEY_PRIVATE).remove(KEY_PUBLIC).apply()
         }
 
         return generateAndSaveKeyPair()
     }
 
-    private fun loadKeyPair(privateB64: String, publicB64: String): KeyPair {
-        val kf = KeyFactory.getInstance(ALGORITHM)
-        val privateBytes = Base64.decode(privateB64, Base64.DEFAULT)
-        val publicBytes = Base64.decode(publicB64, Base64.DEFAULT)
-        val privateKey: PrivateKey = kf.generatePrivate(PKCS8EncodedKeySpec(privateBytes))
-        val publicKey: PublicKey = kf.generatePublic(X509EncodedKeySpec(publicBytes))
-        return KeyPair(publicKey, privateKey)
-    }
-
     private fun generateAndSaveKeyPair(): KeyPair {
-        val kpg = KeyPairGenerator.getInstance(ALGORITHM)
-        kpg.initialize(255) // Ed25519 uses 255-bit key
+        Log.i(TAG, "Generating new hardware-backed Ed25519 identity...")
+        val kpg = KeyPairGenerator.getInstance("Ed25519", "AndroidKeyStore")
+        val spec = KeyGenParameterSpec.Builder(
+            "ferry_identity_key",
+            KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY
+        ).build()
+        
+        kpg.initialize(spec)
         val kp = kpg.generateKeyPair()
-
-        // Store as Base64 encoded DER — private key NEVER appears in logs
-        val privateB64 = Base64.encodeToString(kp.private.encoded, Base64.DEFAULT)
-        val publicB64 = Base64.encodeToString(kp.public.encoded, Base64.DEFAULT)
-
-        prefs.edit()
-            .putString(KEY_PRIVATE, privateB64)
-            .putString(KEY_PUBLIC, publicB64)
-            .apply()
 
         Log.i(TAG, "Generated new Ed25519 identity. Public key: ${publicKeyBytesToB64(kp.public)}...")
         return kp

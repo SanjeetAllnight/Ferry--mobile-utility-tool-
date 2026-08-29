@@ -26,6 +26,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -134,7 +136,10 @@ fun FerryApp(
                         FerrySession.State.DISCONNECTED -> "mDNS peer discovery active on local Wi-Fi (_ferry._tcp)."
                         FerrySession.State.CONNECTING -> "Connecting to ${connectedDevice?.deviceName}..."
                         FerrySession.State.HANDSHAKING -> "Performing cryptographic handshake..."
-                        FerrySession.State.PAIRING -> "Pairing — SAS: ${sasCode ?: "…"} (verify with peer)"
+                        FerrySession.State.PAIRING -> "Pairing — verify code with peer"
+                        FerrySession.State.WAITING_FOR_LOCAL_DECISION -> "Pairing — waiting for your approval"
+                        FerrySession.State.WAITING_FOR_REMOTE_DECISION -> "Waiting for peer to accept..."
+                        FerrySession.State.PAIR_ACCEPTED -> "Pairing mutually accepted!"
                         FerrySession.State.AUTHENTICATING -> "Authenticating with ${connectedDevice?.deviceName}..."
                         FerrySession.State.ESTABLISHED -> "Encrypted session with ${connectedDevice?.deviceName}."
                         FerrySession.State.CLOSING -> "Closing session..."
@@ -273,6 +278,35 @@ fun FerryApp(
             }
 
             Spacer(modifier = Modifier.height(16.dp))
+
+            if (sessionState == FerrySession.State.PAIRING || sessionState == FerrySession.State.WAITING_FOR_LOCAL_DECISION) {
+                AlertDialog(
+                    onDismissRequest = { controlClient?.rejectPairing() },
+                    title = { Text("Pairing Request") },
+                    text = {
+                        Column {
+                            Text("Does this code match the one on the other device?")
+                            Spacer(modifier = Modifier.height(16.dp))
+                            Text(
+                                text = sasCode ?: "...",
+                                style = MaterialTheme.typography.displayMedium,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.align(Alignment.CenterHorizontally)
+                            )
+                        }
+                    },
+                    confirmButton = {
+                        Button(onClick = { controlClient?.acceptPairing() }) {
+                            Text("Accept")
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { controlClient?.rejectPairing() }) {
+                            Text("Reject", color = MaterialTheme.colorScheme.error)
+                        }
+                    }
+                )
+            }
         }
     }
 }
