@@ -61,8 +61,7 @@ Pairing transitions an unknown device from *untrusted* to *trusted*.
 3. **Visual Out-of-Band Confirmation**: Both the Android screen and the Linux GNOME desktop display the computed PIN. The user must manually confirm that both numbers match before keys are persisted.
 4. **Persistent Key Storage**:
    * **Linux**: Private keys and paired public keys stored in `$XDG_DATA_HOME/ferry/ferry.db` (file permissions `0600`).
-   * **Android**: Asymmetric keys generated inside and protected by hardware-backed **Android Keystore** (`AndroidKeyStore`).
-
+   * **Android**: Asymmetric keys generated inside and protected by hardware-backed **Android Keystore** (`AndroidKeyStore`) where supported, with a secure software-backed `SharedPreferences` fallback on devices exhibiting OEM hardware crypto bugs (e.g., generating ECDSA keys when Ed25519 is requested).
 ---
 
 ## 4. Secure File Handling & Path Traversal Mitigations

@@ -4,7 +4,7 @@
 **Date:** 2026-08-30
 
 ## Overview
-Phase 2C implemented the Interactive Trust, Pairing UX & Android Identity Storage for the Ferry protocol. This report documents the final physical verification using a real Android 14 device (Realme RMX3870) and a Linux desktop, confirming the successful operation of the complete authenticated session lifecycle.
+Phase 2C implemented the Interactive Trust, Pairing UX & Android Identity Storage for the Ferry protocol. This report documents the final physical verification using a real Android 16 (SDK 36) device (Realme RMX3870) and a Linux desktop, confirming the successful operation of the complete authenticated session lifecycle.
 
 ## Verification Scenarios and Results
 
@@ -22,8 +22,8 @@ Phase 2C implemented the Interactive Trust, Pairing UX & Android Identity Storag
 During physical verification, two critical real-world device issues were discovered and addressed:
 
 1.  **AndroidKeyStore Hardware Ed25519 Implementation Bug:**
-    *   **Issue:** On the Realme RMX3870 (Android 14), attempting to generate a hardware-backed `Ed25519` key via `AndroidKeyStore` results in the system silently ignoring the `Ed25519` parameter and generating a standard `secp256r1` ECDSA keypair. This caused a `java.lang.IllegalArgumentException: private key algorithm does not match algorithm of public key in end entity certificate` upon KeyStore load, and signature verification failures across the network due to invalid key structures (91 bytes vs the expected 44 bytes).
-    *   **Resolution:** Implemented a robust fallback mechanism in `FerryIdentity.kt`. The system attempts hardware-backed generation, validates the resulting public key size (must be exactly 44 bytes for a valid X.509 Ed25519 key). If it detects the OEM bug, it securely deletes the corrupted hardware key, gracefully falls back to the software `Ed25519` provider (Conscrypt), and safely stores the key material using Android's `EncryptedSharedPreferences`.
+    *   **Issue:** On the Realme RMX3870 (Android 16), attempting to generate a hardware-backed `Ed25519` key via `AndroidKeyStore` results in the system silently ignoring the `Ed25519` parameter and generating a standard `secp256r1` ECDSA keypair. This caused a `java.lang.IllegalArgumentException: private key algorithm does not match algorithm of public key in end entity certificate` upon KeyStore load, and signature verification failures across the network due to invalid key structures (91 bytes vs the expected 44 bytes).
+    *   **Resolution:** Implemented a robust fallback mechanism in `FerryIdentity.kt`. The system attempts hardware-backed generation, validates the resulting public key size (must be exactly 44 bytes for a valid X.509 Ed25519 key). If it detects the OEM bug, it securely deletes the corrupted hardware key, gracefully falls back to the software `Ed25519` provider (Conscrypt), and stores the key material using Android's standard `SharedPreferences` (`Context.MODE_PRIVATE`).
 2.  **Android UI Thread Network I/O Crash:**
     *   **Issue:** The initial implementation invoked `FerryControlClient.sendEncrypted()` synchronously from the Compose `onClick` handlers, causing `NetworkOnMainThreadException` and abruptly dropping the TCP connection mid-handshake when a user clicked Accept/Reject.
     *   **Resolution:** Wrapped the pairing decision network transmissions inside the `FerryControlClient`'s existing background `CoroutineScope` using `Dispatchers.IO`.
