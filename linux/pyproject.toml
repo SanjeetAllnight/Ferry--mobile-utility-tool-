@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ferry-linux"
+version = "0.1.0"
+description = "Local, privacy-first Android to Arch Linux integration service and GNOME UI"
+readme = "../README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "pygobject>=3.46.0",
+]
+
+[project.scripts]
+ferry-linux = "ferry_linux.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

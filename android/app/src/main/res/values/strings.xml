@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Ferry</string>
+    <string name="app_tagline">Android ↔ Arch Linux Integration</string>
+    <string name="phase_status">Phase 1: Foundation Active</string>
+</resources>
