@@ -26,6 +26,7 @@ class TestDatabaseManager(unittest.TestCase):
             device_id="dev-12345",
             device_name="Test Phone",
             public_key="ed25519_base64_pubkey_abc",
+            identity_public_key_b64="ed25519_base64_pubkey_abc",
             paired_at=now,
             last_seen=now,
         )
@@ -35,11 +36,12 @@ class TestDatabaseManager(unittest.TestCase):
         self.assertIsNotNone(retrieved)
         self.assertEqual(retrieved.device_name, "Test Phone")
         self.assertEqual(retrieved.public_key, "ed25519_base64_pubkey_abc")
+        self.assertEqual(retrieved.identity_public_key_b64, "ed25519_base64_pubkey_abc")
 
     def test_list_and_remove_devices(self) -> None:
         now = int(time.time())
-        d1 = TrustedDevice("dev-1", "Phone 1", "key1", now, now)
-        d2 = TrustedDevice("dev-2", "Phone 2", "key2", now, now + 10)
+        d1 = TrustedDevice("dev-1", "Phone 1", "key1", "key1", now, now)
+        d2 = TrustedDevice("dev-2", "Phone 2", "key2", "key2", now, now + 10)
         self.db.add_or_update_device(d1)
         self.db.add_or_update_device(d2)
 
@@ -55,7 +57,7 @@ class TestDatabaseManager(unittest.TestCase):
 
     def test_add_and_list_transfers(self) -> None:
         now = int(time.time())
-        device = TrustedDevice("dev-1", "Phone 1", "key1", now, now)
+        device = TrustedDevice("dev-1", "Phone 1", "key1", "key1", now, now)
         self.db.add_or_update_device(device)
 
         record = TransferRecord(
@@ -76,6 +78,26 @@ class TestDatabaseManager(unittest.TestCase):
         self.assertEqual(transfers[0].transfer_id, "tx-999")
         self.assertEqual(transfers[0].file_name, "photo.jpg")
         self.assertEqual(transfers[0].status, "COMPLETED")
+
+    def test_get_device_by_public_key(self) -> None:
+        now = int(time.time())
+        pubkey = "some_ed25519_b64url_key"
+        device = TrustedDevice(
+            device_id="dev-pk",
+            device_name="Key Device",
+            public_key=pubkey,
+            identity_public_key_b64=pubkey,
+            paired_at=now,
+            last_seen=now,
+        )
+        self.db.add_or_update_device(device)
+
+        found = self.db.get_device_by_public_key(pubkey)
+        self.assertIsNotNone(found)
+        self.assertEqual(found.device_id, "dev-pk")
+
+        not_found = self.db.get_device_by_public_key("nonexistent_key")
+        self.assertIsNone(not_found)
 
 
 if __name__ == "__main__":

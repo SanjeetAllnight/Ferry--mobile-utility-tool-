@@ -6,6 +6,9 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import dev.ferry.app.discovery.FerryDiscoveryEngine
+import dev.ferry.app.net.FerryControlClient
+import dev.ferry.app.net.FerryTrustStore
+import dev.ferry.app.security.FerryIdentity
 import dev.ferry.app.ui.FerryApp
 import dev.ferry.app.ui.theme.FerryTheme
 
@@ -16,18 +19,31 @@ class MainActivity : ComponentActivity() {
     }
 
     private lateinit var discoveryEngine: FerryDiscoveryEngine
+    private lateinit var identity: FerryIdentity
+    private lateinit var trustStore: FerryTrustStore
+    private lateinit var controlClient: FerryControlClient
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
+        identity = FerryIdentity(applicationContext)
+        trustStore = FerryTrustStore(applicationContext)
+        controlClient = FerryControlClient(identity, trustStore)
         discoveryEngine = FerryDiscoveryEngine(applicationContext)
 
-        Log.i(TAG, "Ferry MainActivity started. Initializing discovery engine for device ID: ${discoveryEngine.deviceId}")
+        Log.i(
+            TAG,
+            "Ferry started. DeviceID=${discoveryEngine.deviceId}, " +
+                "IdentityKey=${identity.publicKeyB64.take(12)}..."
+        )
 
         setContent {
             FerryTheme {
-                FerryApp(discoveryEngine = discoveryEngine)
+                FerryApp(
+                    discoveryEngine = discoveryEngine,
+                    controlClient = controlClient,
+                )
             }
         }
     }
@@ -40,5 +56,6 @@ class MainActivity : ComponentActivity() {
     override fun onStop() {
         super.onStop()
         discoveryEngine.stop()
+        controlClient.disconnect()
     }
 }

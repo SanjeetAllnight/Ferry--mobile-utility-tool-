@@ -12,11 +12,15 @@ from pathlib import Path
 from typing import Generator, List, Optional
 
 
+DB_SCHEMA_VERSION = 2  # Phase 2B: added identity_public_key_b64
+
+
 @dataclass
 class TrustedDevice:
     device_id: str
     device_name: str
-    public_key: str
+    public_key: str          # legacy alias kept for compatibility
+    identity_public_key_b64: str  # base64url Ed25519 public key (Phase 2B)
     paired_at: int
     last_seen: int
 
@@ -51,52 +55,90 @@ class DatabaseManager:
             conn.close()
 
     def _init_db(self) -> None:
-        """Create database schema if not exists."""
+        """Create database schema and apply migrations if needed."""
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with self._connection() as conn:
             cursor = conn.cursor()
+
+            # Schema version tracking table
             cursor.execute("""
-                CREATE TABLE IF NOT EXISTS trusted_devices (
-                    device_id TEXT PRIMARY KEY,
-                    device_name TEXT NOT NULL,
-                    public_key TEXT NOT NULL,
-                    paired_at INTEGER NOT NULL,
-                    last_seen INTEGER NOT NULL
+                CREATE TABLE IF NOT EXISTS schema_version (
+                    version INTEGER PRIMARY KEY
                 )
             """)
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS transfer_history (
-                    transfer_id TEXT PRIMARY KEY,
-                    device_id TEXT NOT NULL,
-                    file_name TEXT NOT NULL,
-                    file_size INTEGER NOT NULL,
-                    direction TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    started_at INTEGER NOT NULL,
-                    completed_at INTEGER,
-                    sha256 TEXT NOT NULL,
-                    FOREIGN KEY(device_id) REFERENCES trusted_devices(device_id)
-                )
-            """)
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS settings (
-                    key TEXT PRIMARY KEY,
-                    value TEXT NOT NULL
-                )
-            """)
+
+            cursor.execute("SELECT version FROM schema_version ORDER BY version DESC LIMIT 1")
+            row = cursor.fetchone()
+            current_version = row[0] if row else 0
+
+            if current_version < 1:
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS trusted_devices (
+                        device_id TEXT PRIMARY KEY,
+                        device_name TEXT NOT NULL,
+                        public_key TEXT NOT NULL,
+                        identity_public_key_b64 TEXT NOT NULL DEFAULT '',
+                        paired_at INTEGER NOT NULL,
+                        last_seen INTEGER NOT NULL
+                    )
+                """)
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS transfer_history (
+                        transfer_id TEXT PRIMARY KEY,
+                        device_id TEXT NOT NULL,
+                        file_name TEXT NOT NULL,
+                        file_size INTEGER NOT NULL,
+                        direction TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        started_at INTEGER NOT NULL,
+                        completed_at INTEGER,
+                        sha256 TEXT NOT NULL,
+                        FOREIGN KEY(device_id) REFERENCES trusted_devices(device_id)
+                    )
+                """)
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS settings (
+                        key TEXT PRIMARY KEY,
+                        value TEXT NOT NULL
+                    )
+                """)
+
+            if current_version < 2:
+                # Phase 2B: add identity_public_key_b64 if column missing (migration from v1)
+                try:
+                    cursor.execute("""
+                        ALTER TABLE trusted_devices
+                        ADD COLUMN identity_public_key_b64 TEXT NOT NULL DEFAULT ''
+                    """)
+                except Exception:
+                    pass  # Column already exists
+
+            cursor.execute(
+                "INSERT OR REPLACE INTO schema_version (version) VALUES (?)",
+                (DB_SCHEMA_VERSION,)
+            )
             conn.commit()
 
     def add_or_update_device(self, device: TrustedDevice) -> None:
         with self._connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                INSERT INTO trusted_devices (device_id, device_name, public_key, paired_at, last_seen)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO trusted_devices
+                    (device_id, device_name, public_key, identity_public_key_b64, paired_at, last_seen)
+                VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(device_id) DO UPDATE SET
                     device_name=excluded.device_name,
                     public_key=excluded.public_key,
+                    identity_public_key_b64=excluded.identity_public_key_b64,
                     last_seen=excluded.last_seen
-            """, (device.device_id, device.device_name, device.public_key, device.paired_at, device.last_seen))
+            """, (
+                device.device_id,
+                device.device_name,
+                device.public_key,
+                device.identity_public_key_b64,
+                device.paired_at,
+                device.last_seen,
+            ))
             conn.commit()
 
     def get_device(self, device_id: str) -> Optional[TrustedDevice]:
@@ -110,6 +152,27 @@ class DatabaseManager:
                 device_id=row["device_id"],
                 device_name=row["device_name"],
                 public_key=row["public_key"],
+                identity_public_key_b64=row["identity_public_key_b64"],
+                paired_at=row["paired_at"],
+                last_seen=row["last_seen"],
+            )
+
+    def get_device_by_public_key(self, identity_public_key_b64: str) -> Optional[TrustedDevice]:
+        """Look up a trusted device by its Ed25519 public key (base64url)."""
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM trusted_devices WHERE identity_public_key_b64 = ?",
+                (identity_public_key_b64,)
+            )
+            row = cursor.fetchone()
+            if not row:
+                return None
+            return TrustedDevice(
+                device_id=row["device_id"],
+                device_name=row["device_name"],
+                public_key=row["public_key"],
+                identity_public_key_b64=row["identity_public_key_b64"],
                 paired_at=row["paired_at"],
                 last_seen=row["last_seen"],
             )
@@ -123,6 +186,7 @@ class DatabaseManager:
                     device_id=row["device_id"],
                     device_name=row["device_name"],
                     public_key=row["public_key"],
+                    identity_public_key_b64=row["identity_public_key_b64"],
                     paired_at=row["paired_at"],
                     last_seen=row["last_seen"],
                 )

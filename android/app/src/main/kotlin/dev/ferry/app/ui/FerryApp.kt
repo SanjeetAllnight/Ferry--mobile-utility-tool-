@@ -15,6 +15,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CenterAlignedTopAppBar
@@ -40,13 +42,27 @@ import androidx.compose.ui.unit.dp
 import dev.ferry.app.R
 import dev.ferry.app.discovery.DiscoveredDevice
 import dev.ferry.app.discovery.FerryDiscoveryEngine
+import dev.ferry.app.net.FerryControlClient
 import dev.ferry.app.protocol.ProtocolConstants
+import dev.ferry.app.security.FerrySession
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun FerryApp(discoveryEngine: FerryDiscoveryEngine? = null) {
+fun FerryApp(
+    discoveryEngine: FerryDiscoveryEngine? = null,
+    controlClient: FerryControlClient? = null,
+) {
     val discoveredDevices by discoveryEngine?.discoveredDevices?.collectAsState()
         ?: remember { mutableStateOf(emptyList()) }
+
+    val sessionState by controlClient?.sessionState?.collectAsState()
+        ?: remember { mutableStateOf(FerrySession.State.DISCONNECTED) }
+
+    val connectedDevice by controlClient?.connectedDevice?.collectAsState()
+        ?: remember { mutableStateOf(null) }
+
+    val sasCode by controlClient?.sasCode?.collectAsState()
+        ?: remember { mutableStateOf(null) }
 
     Scaffold(
         topBar = {
@@ -88,14 +104,20 @@ fun FerryApp(discoveryEngine: FerryDiscoveryEngine? = null) {
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
+                        val isEstablished = sessionState == FerrySession.State.ESTABLISHED
                         Box(
                             modifier = Modifier
                                 .size(10.dp)
                                 .clip(CircleShape)
-                                .background(Color(0xFF2E7D32))
+                                .background(
+                                    if (isEstablished) Color(0xFF2E7D32) else Color(0xFF1565C0)
+                                )
                         )
                         Text(
-                            text = "Phase 2A: Local Discovery Active",
+                            text = if (isEstablished)
+                                "Phase 2B: Secure Session Active"
+                            else
+                                "Phase 2B: Control Plane Ready",
                             style = MaterialTheme.typography.labelSmall,
                             fontWeight = FontWeight.Bold,
                             color = MaterialTheme.colorScheme.onPrimaryContainer
@@ -108,8 +130,18 @@ fun FerryApp(discoveryEngine: FerryDiscoveryEngine? = null) {
                         color = MaterialTheme.colorScheme.onPrimaryContainer
                     )
 
+                    val statusText = when (sessionState) {
+                        FerrySession.State.DISCONNECTED -> "mDNS peer discovery active on local Wi-Fi (_ferry._tcp)."
+                        FerrySession.State.CONNECTING -> "Connecting to ${connectedDevice?.deviceName}..."
+                        FerrySession.State.HANDSHAKING -> "Performing cryptographic handshake..."
+                        FerrySession.State.PAIRING -> "Pairing — SAS: ${sasCode ?: "…"} (verify with peer)"
+                        FerrySession.State.AUTHENTICATING -> "Authenticating with ${connectedDevice?.deviceName}..."
+                        FerrySession.State.ESTABLISHED -> "Encrypted session with ${connectedDevice?.deviceName}."
+                        FerrySession.State.CLOSING -> "Closing session..."
+                        FerrySession.State.FAILED -> "Session failed. Tap a device to retry."
+                    }
                     Text(
-                        text = "mDNS peer discovery active on local Wi-Fi (_ferry._tcp).",
+                        text = statusText,
                         style = MaterialTheme.typography.bodyLarge,
                         color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f)
                     )
@@ -216,7 +248,25 @@ fun FerryApp(discoveryEngine: FerryDiscoveryEngine? = null) {
                         }
                     } else {
                         discoveredDevices.forEach { device ->
-                            DiscoveredDeviceCard(device = device)
+                            DiscoveredDeviceCard(
+                                device = device,
+                                isConnected = connectedDevice?.deviceId == device.deviceId &&
+                                        sessionState == FerrySession.State.ESTABLISHED,
+                                isConnecting = connectedDevice?.deviceId == device.deviceId &&
+                                        sessionState !in setOf(
+                                            FerrySession.State.DISCONNECTED,
+                                            FerrySession.State.ESTABLISHED,
+                                            FerrySession.State.FAILED,
+                                        ),
+                                onConnect = {
+                                    if (sessionState == FerrySession.State.DISCONNECTED ||
+                                        sessionState == FerrySession.State.FAILED
+                                    ) {
+                                        controlClient?.connect(device)
+                                    }
+                                },
+                                onDisconnect = { controlClient?.disconnect() },
+                            )
                         }
                     }
                 }
@@ -228,7 +278,13 @@ fun FerryApp(discoveryEngine: FerryDiscoveryEngine? = null) {
 }
 
 @Composable
-private fun DiscoveredDeviceCard(device: DiscoveredDevice) {
+private fun DiscoveredDeviceCard(
+    device: DiscoveredDevice,
+    isConnected: Boolean = false,
+    isConnecting: Boolean = false,
+    onConnect: () -> Unit = {},
+    onDisconnect: () -> Unit = {},
+) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(12.dp),
@@ -248,16 +304,21 @@ private fun DiscoveredDeviceCard(device: DiscoveredDevice) {
                     style = MaterialTheme.typography.bodyLarge,
                     fontWeight = FontWeight.Bold
                 )
+                val (badgeText, badgeColor, badgeBg) = when {
+                    isConnected -> Triple("● Secure", Color(0xFF1B5E20), Color(0xFFE8F5E9))
+                    isConnecting -> Triple("Pairing…", Color(0xFF0D47A1), Color(0xFFE3F2FD))
+                    else -> Triple("Available", MaterialTheme.colorScheme.onPrimaryContainer, MaterialTheme.colorScheme.primaryContainer)
+                }
                 Surface(
                     shape = RoundedCornerShape(6.dp),
-                    color = MaterialTheme.colorScheme.primaryContainer
+                    color = badgeBg
                 ) {
                     Text(
-                        text = "Available",
+                        text = badgeText,
                         modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
                         style = MaterialTheme.typography.labelSmall,
                         fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer
+                        color = badgeColor
                     )
                 }
             }
@@ -267,6 +328,36 @@ private fun DiscoveredDeviceCard(device: DiscoveredDevice) {
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
             )
+
+            if (!isConnecting) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End
+                ) {
+                    if (isConnected) {
+                        Button(
+                            onClick = onDisconnect,
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = MaterialTheme.colorScheme.errorContainer,
+                                contentColor = MaterialTheme.colorScheme.onErrorContainer,
+                            ),
+                        ) { Text("Disconnect") }
+                    } else {
+                        Button(onClick = onConnect) { Text("Connect") }
+                    }
+                }
+            } else {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(16.dp),
+                        strokeWidth = 2.dp,
+                    )
+                }
+            }
         }
     }
 }

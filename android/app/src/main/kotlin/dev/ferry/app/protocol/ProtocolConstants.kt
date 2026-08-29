@@ -10,11 +10,21 @@ object ProtocolConstants {
     val MAGIC_BYTES: ByteArray = byteArrayOf(0x46.toByte(), 0x59.toByte()) // "FY"
 
     object MessageTypes {
+        // Phase 2B: connection/session
+        const val HELLO = "HELLO"
+        const val AUTH_CHALLENGE = "AUTH_CHALLENGE"
+        const val AUTH_RESPONSE = "AUTH_RESPONSE"
+        const val SESSION_ESTABLISHED = "SESSION_ESTABLISHED"
+        const val SESSION_ERROR = "SESSION_ERROR"
+        const val DISCONNECT = "DISCONNECT"
+
+        // Handshake & pairing
         const val HANDSHAKE_INIT = "HANDSHAKE_INIT"
         const val HANDSHAKE_RESPONSE = "HANDSHAKE_RESPONSE"
         const val PAIR_REQUEST = "PAIR_REQUEST"
         const val PAIR_CONFIRM = "PAIR_CONFIRM"
 
+        // File transfer
         const val TRANSFER_REQUEST = "TRANSFER_REQUEST"
         const val TRANSFER_ACCEPT = "TRANSFER_ACCEPT"
         const val TRANSFER_REJECT = "TRANSFER_REJECT"
