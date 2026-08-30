@@ -9,8 +9,8 @@ This document is the primary persistent context file for **Ferry**. It reflects 
 **Goal:** Implement file transfer capabilities between paired devices.
 
 ### Phase 3 Progress Tracking:
-- **Phase 3A (Transfer Architecture & Base Data Channel)**: Implementation complete. TransferState and metadata tracking implemented on both OS platforms. In-band multiplexing via binary `FYCH` chunk frames established over existing ChaCha20-Poly1305 sessions. All unit tests passing. Physical Android-Linux verification is in progress.
-- **Phase 3B (Sender & Receiver UI)**: Pending
+- **Phase 3A (Transfer Architecture & Base Data Channel)**: Complete / Verified. TransferState and metadata tracking implemented on both OS platforms. In-band multiplexing via binary `FYCH` chunk frames established over existing ChaCha20-Poly1305 sessions (ADR 007). All unit tests passing (127 Linux, 50 Android). Physical Android ↔ Linux streaming and SHA-256 integrity verified over local Wi-Fi.
+- **Phase 3B (Sender & Receiver UI)**: Pending (Next)
 - **Phase 3C (Transfer Resumption & Cancel)**: Pending Start
 
 ### Previous Phase: Phase 2C (Interactive Trust & Identity Storage)
@@ -122,8 +122,8 @@ adb shell am start -n dev.ferry.app/.MainActivity
 
 ## 7. Next Recommended Task
 
-* **Wait for Physical Verification (Phase 3A)**: Complete the Android-Linux physical file transfer validation before proceeding.
 * **Begin Phase 3B (Sender & Receiver UI)**:
   - Implement Android SAF `ACTION_OPEN_DOCUMENT` and `ACTION_SEND` intent handlers to select files to send.
   - Implement GTK4 `Gtk.FileDialog` for selecting files on Linux.
-  - Wire UI actions to the `FerryService.send_file()` and Android's `FerryTransferClient.streamChunks()`.
+  - Wire UI actions to `FerryService.send_file()` and Android's `FerryTransferClient.streamChunks()`.
+  - Add file transfer progress indicators and transfer completion alerts in both UIs.
