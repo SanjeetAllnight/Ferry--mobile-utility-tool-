@@ -86,7 +86,7 @@ This document is the primary persistent context file for **Ferry**. It reflects 
 
 ### Linux
 ```bash
-# Run all unit and integration tests (127 tests)
+# Run all unit and integration tests (147 tests)
 PYTHONPATH=linux/src python3 -m unittest discover -s linux/tests -v
 
 # Run desktop UI with discovery active

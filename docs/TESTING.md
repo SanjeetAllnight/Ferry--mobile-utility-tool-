@@ -35,9 +35,10 @@ This document outlines the testing strategy, test layers, and verification comma
   * `test_session.py`: Verifies session state machine, X25519 DH exchange, HKDF key derivation, 6-digit SAS code derivation, and ChaCha20-Poly1305 AEAD framing.
   * `test_control_plane.py`: Verifies end-to-end AKE, bidirectional interactive pairing flows, remote/local decision sequences, trust persistence, reconnection with pinned keys, and unpairing.
   * `test_transfer.py`: Verifies Phase 3A file transfer state machine, chunk framing (`FYCH`), filename sanitization, incremental SHA-256 validation, and atomic staging lifecycle.
+  * `test_receiver.py`: Verifies Phase 3B Linux receiver event bus, interactive approval/rejection lifecycle, download directory resolution, and error handling.
 
 ```bash
-# Run all Linux tests (127 tests)
+# Run all Linux tests (147 tests)
 PYTHONPATH=linux/src python3 -m unittest discover -s linux/tests -v
 ```
 

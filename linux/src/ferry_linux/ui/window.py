@@ -200,13 +200,6 @@ class FerryMainWindow(Adw.ApplicationWindow):
                 dlg.close()
 
         if state in (SessionState.PAIRING, SessionState.WAITING_FOR_LOCAL_DECISION):
-            print(f"AUTO-ACCEPTING PAIRING for {remote_addr}")
-            import asyncio
-            app.get_loop().call_soon_threadsafe(
-                lambda: asyncio.ensure_future(app.service.accept_pairing(remote_addr), loop=app.get_loop())
-            )
-            return
-            
             if remote_addr in self._pairing_dialogs:
                 return
 
@@ -243,13 +236,6 @@ class FerryMainWindow(Adw.ApplicationWindow):
         app = self.get_application()
         if not app or not app.service:
             return
-
-        print(f"AUTO-ACCEPTING TRANSFER for {file_name}")
-        import asyncio
-        app.get_loop().call_soon_threadsafe(
-            lambda: asyncio.ensure_future(app.service.accept_transfer(remote_addr, transfer_id), loop=app.get_loop())
-        )
-        return
 
         ps = app.service._active_sessions.get(remote_addr)
         device_name = ps.remote_device_name if ps else "Unknown Device"
