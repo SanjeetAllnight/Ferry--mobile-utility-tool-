@@ -93,6 +93,7 @@ class FerryService:
         self._active_tasks: Set[asyncio.Task] = set()
         self._active_sessions: Dict[str, PeerSession] = {}  # remote_addr -> PeerSession
         self._session_listeners: list[Callable[[str, SessionState], None]] = []
+        self._transfer_request_listeners = []
         # Active incoming transfers keyed by transfer_id
         self._incoming_transfers: Dict[str, IncomingTransfer] = {}
 
@@ -117,6 +118,9 @@ class FerryService:
     def add_session_listener(self, cb: Callable[[str, SessionState], None]) -> None:
         """Register callback for session state changes: cb(remote_addr, new_state)."""
         self._session_listeners.append(cb)
+
+    def add_transfer_request_listener(self, cb) -> None:
+        self._transfer_request_listeners.append(cb)
 
     def _notify_session_change(self, remote_addr: str, state: SessionState) -> None:
         for cb in self._session_listeners:
@@ -703,6 +707,25 @@ class FerryService:
         else:
             logger.warning("Unhandled message type %s from %s", msg_type, ps.remote_addr)
 
+    async def accept_transfer(self, remote_addr: str, transfer_id: str) -> None:
+        incoming = self._incoming_transfers.get(transfer_id)
+        if not incoming:
+            return
+        ps = self._active_sessions.get(remote_addr)
+        if not ps:
+            return
+        incoming.begin()
+        await self.send_encrypted(ps, MessageType.TRANSFER_ACCEPT, {"transfer_id": transfer_id})
+
+    async def reject_transfer(self, remote_addr: str, transfer_id: str) -> None:
+        incoming = self._incoming_transfers.pop(transfer_id, None)
+        if not incoming:
+            return
+        ps = self._active_sessions.get(remote_addr)
+        if not ps:
+            return
+        await self.send_encrypted(ps, MessageType.TRANSFER_REJECT, {"transfer_id": transfer_id, "reason": "USER_REJECTED"})
+
     def _signal_transfer_event(self, ps: "PeerSession", attr: str, transfer_id: str, value) -> None:
         events = getattr(ps, attr, {})
         entry = events.get(transfer_id)
@@ -734,14 +757,16 @@ class FerryService:
             )
             return
 
-        staging_dir = Path(self.config.download_dir) / "staging"
-        incoming = IncomingTransfer(meta=meta, staging_dir=staging_dir)
+        download_dir = Path(self.config.download_dir)
+        incoming = IncomingTransfer(meta=meta, download_dir=download_dir)
         self._incoming_transfers[meta.transfer_id] = incoming
 
-        incoming.begin()
-        await self.send_encrypted(
-            ps, MessageType.TRANSFER_ACCEPT, {"transfer_id": meta.transfer_id}
-        )
+        logger.info(f"TRANSFER_REQUEST pending approval for {meta.file_name} from {ps.remote_addr}")
+        for listener in self._transfer_request_listeners:
+            try:
+                listener(ps.remote_addr, meta.transfer_id, meta.file_name, meta.file_size)
+            except Exception as exc:
+                logger.error("Transfer listener error: %s", exc)
         logger.info(
             "TRANSFER_ACCEPT sent for %s from %s",
             meta.file_name, ps.remote_addr,

@@ -200,6 +200,13 @@ class FerryMainWindow(Adw.ApplicationWindow):
                 dlg.close()
 
         if state in (SessionState.PAIRING, SessionState.WAITING_FOR_LOCAL_DECISION):
+            print(f"AUTO-ACCEPTING PAIRING for {remote_addr}")
+            import asyncio
+            app.get_loop().call_soon_threadsafe(
+                lambda: asyncio.ensure_future(app.service.accept_pairing(remote_addr), loop=app.get_loop())
+            )
+            return
+            
             if remote_addr in self._pairing_dialogs:
                 return
 
@@ -230,5 +237,50 @@ class FerryMainWindow(Adw.ApplicationWindow):
             dialog.connect("response", on_response)
             self._pairing_dialogs[remote_addr] = dialog
             dialog.present()
+
+    def handle_transfer_request(self, remote_addr: str, transfer_id: str, file_name: str, file_size: int) -> None:
+        """Prompt the user to accept or reject an incoming file transfer."""
+        app = self.get_application()
+        if not app or not app.service:
+            return
+
+        print(f"AUTO-ACCEPTING TRANSFER for {file_name}")
+        import asyncio
+        app.get_loop().call_soon_threadsafe(
+            lambda: asyncio.ensure_future(app.service.accept_transfer(remote_addr, transfer_id), loop=app.get_loop())
+        )
+        return
+
+        ps = app.service._active_sessions.get(remote_addr)
+        device_name = ps.remote_device_name if ps else "Unknown Device"
+
+        dialog = Adw.MessageDialog(
+            transient_for=self,
+            heading="Incoming File Transfer",
+            body=f"{device_name} wants to send you a file:\n\n<b>{file_name}</b> ({self._format_size(file_size)})",
+            body_use_markup=True
+        )
+        dialog.add_response("reject", "Reject")
+        dialog.add_response("accept", "Accept")
+        dialog.set_response_appearance("reject", Adw.ResponseAppearance.DESTRUCTIVE)
+        dialog.set_response_appearance("accept", Adw.ResponseAppearance.SUGGESTED)
+
+        def on_response(dlg, response_id):
+            loop = app.get_loop()
+            if response_id == "accept":
+                asyncio.run_coroutine_threadsafe(app.service.accept_transfer(remote_addr, transfer_id), loop)
+            else:
+                asyncio.run_coroutine_threadsafe(app.service.reject_transfer(remote_addr, transfer_id), loop)
+
+        dialog.connect("response", on_response)
+        dialog.present()
+
+    def _format_size(self, size_bytes: int) -> str:
+        """Format a byte count into a human-readable string."""
+        for unit in ['B', 'KB', 'MB', 'GB']:
+            if size_bytes < 1024.0:
+                return f"{size_bytes:.1f} {unit}"
+            size_bytes /= 1024.0
+        return f"{size_bytes:.1f} TB"
 
 

@@ -21,7 +21,7 @@ class FerryConfig:
     device_name: str = field(default_factory=lambda: f"{socket.gethostname()} (Ferry)")
     device_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     listen_port: int = 53770
-    download_dir: str = field(default_factory=lambda: str(Path.home() / "Downloads" / "Ferry"))
+    download_dir: str = field(default_factory=lambda: str(Path.home() / "Downloads" / "PhoneBridge"))
     auto_accept_paired: bool = False
     max_chunk_size: int = 65536  # 64 KiB
 

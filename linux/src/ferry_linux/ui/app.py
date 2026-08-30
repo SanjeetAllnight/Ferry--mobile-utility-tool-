@@ -41,6 +41,7 @@ class FerryApplication(Adw.Application):
         self.service = FerryService()
         self.service.discovery.add_listener(self._on_devices_changed)
         self.service.add_session_listener(self._on_session_changed)
+        self.service.add_transfer_request_listener(self._on_transfer_request)
 
         def run_asyncio():
             self._loop = asyncio.new_event_loop()
@@ -58,6 +59,10 @@ class FerryApplication(Adw.Application):
         if self.service and self.window:
             # We'll pass this to window so it can show the pairing dialog if needed
             GLib.idle_add(self.window.handle_session_state, remote_addr, state)
+
+    def _on_transfer_request(self, remote_addr: str, transfer_id: str, file_name: str, file_size: int) -> None:
+        if self.service and self.window:
+            GLib.idle_add(self.window.handle_transfer_request, remote_addr, transfer_id, file_name, file_size)
 
     def get_service(self):
         return self.service

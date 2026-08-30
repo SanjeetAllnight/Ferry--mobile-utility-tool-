@@ -324,9 +324,10 @@ class IncomingTransfer:
     the temp file is atomically renamed to its final destination.
     """
 
-    def __init__(self, meta: TransferMetadata, staging_dir: Path) -> None:
+    def __init__(self, meta: TransferMetadata, download_dir: Path) -> None:
         self.meta = meta
-        self._staging_dir = staging_dir
+        self._download_dir = download_dir
+        self._staging_dir = download_dir / "staging"
         self._state = TransferState.IDLE
         self._temp_path: Optional[Path] = None
         self._final_path: Optional[Path] = None
@@ -348,9 +349,10 @@ class IncomingTransfer:
         self._state = _transfer_transition(self._state, TransferState.ACCEPTED)
         staging_dir = self._staging_dir
         staging_dir.mkdir(parents=True, exist_ok=True)
+        self._download_dir.mkdir(parents=True, exist_ok=True)
         temp_name = f"{self.meta.transfer_id}.part"
         self._temp_path = staging_dir / temp_name
-        self._final_path = resolve_safe_destination(staging_dir, self.meta.file_name)
+        self._final_path = resolve_safe_destination(self._download_dir, self.meta.file_name)
         self._temp_fh = open(self._temp_path, "wb")
         self._state = _transfer_transition(self._state, TransferState.TRANSFERRING)
         logger.info(

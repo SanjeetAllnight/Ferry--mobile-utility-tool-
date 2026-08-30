@@ -368,20 +368,20 @@ class TestIncomingTransferSequencing(unittest.TestCase):
         )
 
     def test_correct_sequence_accepted(self):
-        xfer = IncomingTransfer(meta=self.meta, staging_dir=self.tmpdir)
+        xfer = IncomingTransfer(meta=self.meta, download_dir=self.tmpdir)
         xfer.begin()
         chunk = ChunkFrame(transfer_id=self.meta.transfer_id, seq=0, data=b"x" * 100)
         xfer.receive_chunk(chunk)  # should not raise
 
     def test_out_of_order_chunk_rejected(self):
-        xfer = IncomingTransfer(meta=self.meta, staging_dir=self.tmpdir)
+        xfer = IncomingTransfer(meta=self.meta, download_dir=self.tmpdir)
         xfer.begin()
         chunk = ChunkFrame(transfer_id=self.meta.transfer_id, seq=1, data=b"x")
         with self.assertRaises(ValueError):
             xfer.receive_chunk(chunk)
 
     def test_wrong_transfer_id_rejected(self):
-        xfer = IncomingTransfer(meta=self.meta, staging_dir=self.tmpdir)
+        xfer = IncomingTransfer(meta=self.meta, download_dir=self.tmpdir)
         xfer.begin()
         chunk = ChunkFrame(transfer_id=str(uuid.uuid4()), seq=0, data=b"x")
         with self.assertRaises(ValueError):
@@ -432,7 +432,7 @@ class TestTransferLifecycle(unittest.TestCase):
         self.assertEqual(meta.sha256, expected_sha256)
 
         staging = self.tmpdir / "staging"
-        receiver = IncomingTransfer(meta=meta, staging_dir=staging)
+        receiver = IncomingTransfer(meta=meta, download_dir=staging)
         receiver.begin()
 
         async for raw_frame in sender.stream_chunks():
@@ -459,7 +459,7 @@ class TestTransferLifecycle(unittest.TestCase):
         meta = sender.build_metadata(sender_identity="test")
 
         staging = self.tmpdir / "staging2"
-        receiver = IncomingTransfer(meta=meta, staging_dir=staging)
+        receiver = IncomingTransfer(meta=meta, download_dir=staging)
         receiver.begin()
 
         async for raw_frame in sender.stream_chunks():
@@ -484,7 +484,7 @@ class TestTransferLifecycle(unittest.TestCase):
         meta = sender.build_metadata(sender_identity="test")
 
         staging = self.tmpdir / "staging3"
-        receiver = IncomingTransfer(meta=meta, staging_dir=staging)
+        receiver = IncomingTransfer(meta=meta, download_dir=staging)
         receiver.begin()
 
         # Write a chunk before cancelling

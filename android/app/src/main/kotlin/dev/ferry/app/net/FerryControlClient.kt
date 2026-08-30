@@ -13,6 +13,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -393,6 +394,15 @@ class FerryControlClient(
                 Log.e(TAG, "TRANSFER_ERROR from peer: [${payload.optString("error_code")}] ${payload.optString("message")}")
                 activeReceiver?.cancel()
                 activeReceiver = null
+                _testTransferAccepted = false
+            }
+            ProtocolConstants.MessageTypes.TRANSFER_ACCEPT -> {
+                Log.i(TAG, "TRANSFER_ACCEPT received for ${transferId.take(8)}")
+                _testTransferAccepted = true
+            }
+            ProtocolConstants.MessageTypes.TRANSFER_REJECT -> {
+                Log.w(TAG, "TRANSFER_REJECT received for ${transferId.take(8)}")
+                _testTransferAccepted = false
             }
             else -> Log.w(TAG, "Unhandled transfer message type: $type")
         }
@@ -459,6 +469,79 @@ class FerryControlClient(
         val frame = sess.encryptFrame(plaintext)
         output.write(frame)
         output.flush()
+    }
+
+    // ------------------------------------------------------------------
+    // Outgoing Transfers (Phase 3B / Testing)
+    // ------------------------------------------------------------------
+    
+    // For testing ONLY
+    var _testTransferAccepted: Boolean? = null
+    
+    suspend fun sendFile(fileBytes: ByteArray, fileName: String, mimeType: String): Boolean = withContext(Dispatchers.IO) {
+        val sess = session
+        val out = activeOutput
+        if (sess == null || out == null || sess.state != FerrySession.State.ESTABLISHED) {
+            Log.e(TAG, "Cannot send file: session not ESTABLISHED")
+            return@withContext false
+        }
+        
+        val transferId = UUID.randomUUID().toString()
+        val sha256 = dev.ferry.app.transfer.FerryTransferClient.sha256Hex(fileBytes)
+        val chunkSize = dev.ferry.app.transfer.FerryTransferClient.CHUNK_SIZE
+        val chunkCount = (fileBytes.size + chunkSize - 1) / chunkSize
+        
+        val payload = JSONObject().apply {
+            put("transfer_id", transferId)
+            put("file_name", fileName)
+            put("file_size", fileBytes.size)
+            put("mime_type", mimeType)
+            put("sha256", sha256)
+            put("chunk_size", chunkSize)
+            put("chunk_count", chunkCount)
+            put("sender_identity", identity.publicKeyB64)
+            put("created_at", System.currentTimeMillis())
+        }
+        
+        _testTransferAccepted = null
+        Log.i(TAG, "Sending TRANSFER_REQUEST for $fileName")
+        sendEncryptedMessage(sess, out, ProtocolConstants.MessageTypes.TRANSFER_REQUEST, payload)
+        
+        Log.i(TAG, "Waiting for TRANSFER_ACCEPT...")
+        var waits = 0
+        while (_testTransferAccepted == null && waits < 60) {
+            delay(1000)
+            waits++
+        }
+        
+        if (_testTransferAccepted != true) {
+            Log.e(TAG, "Transfer was not accepted or timed out. (value=$_testTransferAccepted)")
+            return@withContext false
+        }
+        
+        Log.i(TAG, "Starting chunk stream...")
+        val client = dev.ferry.app.transfer.FerryTransferClient()
+        val streamResult = client.streamChunks(
+            transferId = transferId,
+            fileBytes = fileBytes,
+            encryptAndWrite = { frame ->
+                val encrypted = sess.encryptFrame(frame)
+                out.write(encrypted)
+                out.flush()
+            }
+        )
+        
+        if (streamResult) {
+            Log.i(TAG, "Streaming complete, sending TRANSFER_COMPLETE")
+            sendEncryptedMessage(sess, out, ProtocolConstants.MessageTypes.TRANSFER_COMPLETE, 
+                JSONObject().apply { put("transfer_id", transferId) })
+        } else {
+            Log.w(TAG, "Streaming cancelled")
+            sendEncryptedMessage(sess, out, ProtocolConstants.MessageTypes.TRANSFER_CANCEL, 
+                JSONObject().apply { put("transfer_id", transferId); put("reason", "ABORTED") })
+        }
+        
+        return@withContext streamResult
     }
 
     // ------------------------------------------------------------------

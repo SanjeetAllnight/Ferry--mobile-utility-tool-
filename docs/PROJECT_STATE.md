@@ -10,8 +10,8 @@ This document is the primary persistent context file for **Ferry**. It reflects 
 
 ### Phase 3 Progress Tracking:
 - **Phase 3A (Transfer Architecture & Base Data Channel)**: Complete / Verified. TransferState and metadata tracking implemented on both OS platforms. In-band multiplexing via binary `FYCH` chunk frames established over existing ChaCha20-Poly1305 sessions (ADR 007). All unit tests passing (127 Linux, 50 Android). Physical Android ↔ Linux streaming and SHA-256 integrity verified over local Wi-Fi.
-- **Phase 3B (Sender & Receiver UI)**: Pending (Next)
-- **Phase 3C (Transfer Resumption & Cancel)**: Pending Start
+- **Phase 3B (Linux File Receiving & Transfer Approvals)**: Complete / Verified. `IncomingTransfer` refactored to parse directly to user's specified `download_dir`. Receiver `FerryService` extended to surface `TRANSFER_REQUEST` up to the UI. Fully integration tested on Linux and physically verified receiving a file from Android over Wi-Fi.
+- **Phase 3C (Sender & Receiver UI / File Picking)**: Pending (Next)
 
 ### Previous Phase: Phase 2C (Interactive Trust & Identity Storage)
 **Status:** Complete / Verified
@@ -122,7 +122,7 @@ adb shell am start -n dev.ferry.app/.MainActivity
 
 ## 7. Next Recommended Task
 
-* **Begin Phase 3B (Sender & Receiver UI)**:
+* **Begin Phase 3C (Sender & Receiver UI / File Picking)**:
   - Implement Android SAF `ACTION_OPEN_DOCUMENT` and `ACTION_SEND` intent handlers to select files to send.
   - Implement GTK4 `Gtk.FileDialog` for selecting files on Linux.
   - Wire UI actions to `FerryService.send_file()` and Android's `FerryTransferClient.streamChunks()`.
