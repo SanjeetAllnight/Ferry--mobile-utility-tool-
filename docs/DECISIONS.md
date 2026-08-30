@@ -116,3 +116,54 @@ Ferry requires automatic peer discovery across local Wi-Fi / LAN without cloud r
 
 ### Consequences
 * Fast, native peer discovery across Arch Linux and Android on standard Wi-Fi subnets with zero external dependencies. Discovered devices remain unauthenticated until explicit pairing in Phase 2C.
+
+---
+
+## ADR 007 — In-Band Transfer Multiplexing (Phase 3A)
+
+**Date:** 2026-08-30  
+**Status:** Accepted
+
+### Context
+
+Phase 3A establishes the secure file transfer transport layer. A key architectural decision was required: should transfer data flow over the existing authenticated AEAD-encrypted control session, or should a separate authenticated data connection be established for bulk data?
+
+### Two Options Considered
+
+**Option A — In-band multiplexing over existing session:**  
+All transfer control and data flows over the already-authenticated AEAD-encrypted TCP connection. Data chunks are binary frames starting with a 4-byte `FYCH` magic prefix (distinct from JSON control envelopes) inside the AEAD plaintext.
+
+**Option B — Separate authenticated data connection:**  
+A second TCP connection is established for bulk data, authenticated by a short-lived session token derived from the primary session key.
+
+### Decision: Option A — In-band multiplexing
+
+### Rationale
+
+| Factor | Option A (chosen) | Option B |
+|---|---|---|
+| Implementation complexity | Low — reuse existing framing | High — 2nd auth handshake, token management |
+| Android complexity | 1 socket per session | 2 sockets, lifecycle risk on Android |
+| Security | Inherits AEAD session auth | Requires explicit token binding; wider attack surface |
+| Protocol simplicity | Single connection | Significantly more complex |
+| Concurrent transfers (future) | Transfer-ID multiplexing in frames | Separate sockets, but more state |
+| Resumability (future) | Sequence numbers support it | Same |
+
+For Ferry's MVP scope (single active transfer, LAN speeds, paired devices), Option A is simpler, safer, and sufficient. All TRANSFER_CHUNK frames are AEAD-authenticated by the session nonce counter, providing replay protection with no additional handshake.
+
+### Chunk Frame Format (binary, inside AEAD plaintext)
+
+```
+[4B "FYCH"] [16B UUID bytes] [4B seq uint32 BE] [4B payload_len uint32 BE] [N bytes chunk data]
+```
+
+Total header: 28 bytes. Selected chunk payload size: 64 KiB.
+
+### Consequences
+
+- MVP: one active transfer at a time; busy-reject additional requests
+- No second authentication mechanism required
+- Future concurrent transfers can be added via transfer-ID without transport changes
+- Transfer resumability (sequence numbers present) deferred to a later phase
+- The data channel is as secure as the control channel; no new crypto is introduced
+

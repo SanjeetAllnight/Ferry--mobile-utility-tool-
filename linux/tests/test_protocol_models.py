@@ -3,17 +3,21 @@ Unit tests for Ferry Protocol Models and Binary Framing.
 """
 
 import unittest
+import uuid
 
 from ferry_linux.protocol.models import (
     MAGIC_BYTES,
     PROTOCOL_VERSION,
     FerryEnvelope,
     MessageType,
-    TransferItem,
     TransferRequestPayload,
+    TransferCompletePayload,
+    TransferResultPayload,
     decode_frame,
     encode_frame,
 )
+
+CHUNK_SIZE = 65536
 
 
 class TestProtocolModels(unittest.TestCase):
@@ -31,26 +35,26 @@ class TestProtocolModels(unittest.TestCase):
         self.assertEqual(restored.message_id, env.message_id)
 
     def test_transfer_request_payload(self) -> None:
-        item = TransferItem(
-            item_id="item-1",
+        tid = str(uuid.uuid4())
+        req = TransferRequestPayload(
+            transfer_id=tid,
             file_name="sample.pdf",
             file_size=5000,
             mime_type="application/pdf",
-            sha256="fakehash",
-        )
-        req = TransferRequestPayload(
-            transfer_id="tx-100",
-            items=[item],
-            total_bytes=5000,
+            sha256="a" * 64,
+            chunk_size=CHUNK_SIZE,
+            chunk_count=1,
+            sender_identity="key",
+            created_at=0,
         )
 
         data = req.to_dict()
         restored = TransferRequestPayload.from_dict(data)
 
-        self.assertEqual(restored.transfer_id, "tx-100")
-        self.assertEqual(len(restored.items), 1)
-        self.assertEqual(restored.items[0].file_name, "sample.pdf")
-        self.assertEqual(restored.total_bytes, 5000)
+        self.assertEqual(restored.transfer_id, tid)
+        self.assertEqual(restored.file_name, "sample.pdf")
+        self.assertEqual(restored.file_size, 5000)
+        self.assertEqual(restored.chunk_count, 1)
 
     def test_binary_frame_encode_decode(self) -> None:
         env = FerryEnvelope(

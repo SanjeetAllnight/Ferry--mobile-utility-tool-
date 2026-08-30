@@ -93,6 +93,7 @@ class FerryMainWindow(Adw.ApplicationWindow):
         content_box.append(self.devices_group)
 
         self._device_rows: list[Adw.ActionRow] = []
+        self._pairing_dialogs: dict[str, Adw.MessageDialog] = {}
         self._set_empty_devices_state()
         GLib.idle_add(self._update_trusted_devices)
 
@@ -189,14 +190,26 @@ class FerryMainWindow(Adw.ApplicationWindow):
         # Always update trusted devices list in case a session was established
         if state == SessionState.ESTABLISHED:
             self._update_trusted_devices()
+            dlg = self._pairing_dialogs.pop(remote_addr, None)
+            if dlg:
+                dlg.close()
 
-        if state == SessionState.PAIRING:
+        if state in (SessionState.FAILED, SessionState.DISCONNECTED, SessionState.CLOSING):
+            dlg = self._pairing_dialogs.pop(remote_addr, None)
+            if dlg:
+                dlg.close()
+
+        if state in (SessionState.PAIRING, SessionState.WAITING_FOR_LOCAL_DECISION):
+            if remote_addr in self._pairing_dialogs:
+                return
+
             ps = app.service._active_sessions.get(remote_addr)
             if not ps:
                 return
 
             sas = ps.session.sas_code
             dialog = Adw.MessageDialog(
+                transient_for=self,
                 heading=f"Pair with {ps.remote_device_name}?",
                 body=f"Verify that the following 6-digit code matches the one shown on {ps.remote_device_name}:\n\n<span size='xx-large' weight='bold'>{sas}</span>",
                 body_use_markup=True
@@ -207,6 +220,7 @@ class FerryMainWindow(Adw.ApplicationWindow):
             dialog.set_response_appearance("accept", Adw.ResponseAppearance.SUGGESTED)
 
             def on_response(dlg, response_id):
+                self._pairing_dialogs.pop(remote_addr, None)
                 loop = app.get_loop()
                 if response_id == "accept":
                     asyncio.run_coroutine_threadsafe(app.service.accept_pairing(remote_addr), loop)
@@ -214,5 +228,7 @@ class FerryMainWindow(Adw.ApplicationWindow):
                     asyncio.run_coroutine_threadsafe(app.service.reject_pairing(remote_addr), loop)
 
             dialog.connect("response", on_response)
-            dialog.present(self)
+            self._pairing_dialogs[remote_addr] = dialog
+            dialog.present()
+
 

@@ -25,13 +25,15 @@ object ProtocolConstants {
         const val PAIR_CONFIRM = "PAIR_CONFIRM"
         const val PAIR_DECISION = "PAIR_DECISION"
 
-        // File transfer
+        // File transfer (Phase 3A)
         const val TRANSFER_REQUEST = "TRANSFER_REQUEST"
         const val TRANSFER_ACCEPT = "TRANSFER_ACCEPT"
         const val TRANSFER_REJECT = "TRANSFER_REJECT"
+        const val TRANSFER_CHUNK = "TRANSFER_CHUNK"       // binary frame; FYCH magic in plaintext
         const val TRANSFER_PROGRESS = "TRANSFER_PROGRESS"
         const val TRANSFER_CANCEL = "TRANSFER_CANCEL"
-        const val TRANSFER_COMPLETE = "TRANSFER_COMPLETE"
+        const val TRANSFER_COMPLETE = "TRANSFER_COMPLETE"  // sender → receiver: all chunks sent
+        const val TRANSFER_RESULT = "TRANSFER_RESULT"      // receiver → sender: integrity verdict
         const val TRANSFER_ERROR = "TRANSFER_ERROR"
     }
 

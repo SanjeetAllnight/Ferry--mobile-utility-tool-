@@ -5,8 +5,13 @@ This document is the primary persistent context file for **Ferry**. It reflects 
 ---
 
 ### Current Phase: Phase 3 (File Transfer Execution)
-**Status:** Pending Start
+**Status:** In Progress
 **Goal:** Implement file transfer capabilities between paired devices.
+
+### Phase 3 Progress Tracking:
+- **Phase 3A (Transfer Architecture & Base Data Channel)**: Implementation complete. TransferState and metadata tracking implemented on both OS platforms. In-band multiplexing via binary `FYCH` chunk frames established over existing ChaCha20-Poly1305 sessions. All unit tests passing. Physical Android-Linux verification is in progress.
+- **Phase 3B (Sender & Receiver UI)**: Pending
+- **Phase 3C (Transfer Resumption & Cancel)**: Pending Start
 
 ### Previous Phase: Phase 2C (Interactive Trust & Identity Storage)
 **Status:** Complete / Verified
@@ -53,15 +58,15 @@ This document is the primary persistent context file for **Ferry**. It reflects 
 * [x] **Android Secure Control Plane (Phase 2B)**:
   * Handshake, HKDF SAS derivation, and ChaCha20-Poly1305 framing working.
   * Verified unit tests (`SessionTest.kt`, `CryptoTest.kt`, `ControlClientTest.kt`).
-* [x] **Interactive Trust & Android KeyStore (Phase 2C)**:
-  * **Android**: Ed25519 identity now correctly implemented using `AndroidKeyStore` (`KeyGenParameterSpec`), guaranteeing secure hardware-backed storage where available.
+* [x] **Interactive Trust & Android KeyStore (Phase 2C / 2C.3)**:
+  * **Android**: Ed25519 identity implemented using `AndroidKeyStore` (`KeyGenParameterSpec`) with hardware backing.
   * **Android**: Interactive UI for incoming connections displaying the 6-digit SAS code, allowing Accept/Reject.
   * **Linux**: `TrustedDevices` SQLite table accurately tracking previously authenticated peers.
-  * **Linux**: Adw.MessageDialog prompting user to confirm pairing codes before advancing to `ESTABLISHED`.
-  * **Both**: Interactive handshake verified to halt at `PAIRING` state. Upon explicit acceptance by both parties, connection progresses to `ESTABLISHED`. State transitions verified via full unit test coverage.
-* [x] **Physical End-to-End Control Plane Verification (Phase 2B/2C)**:
+  * **Linux**: `Adw.MessageDialog` prompting user to confirm pairing codes before advancing to `ESTABLISHED` (fixed in Phase 2C.3: proper `transient_for=self` and `dialog.present()` without parameter).
+  * **Both**: Interactive handshake verified to halt at `PAIRING` state. Upon explicit acceptance by both parties, connection progresses to `ESTABLISHED`. State transitions verified via full unit test coverage (127 tests in Linux test suite, 50 Android tests).
+* [x] **Physical End-to-End Control Plane Verification (Phase 2B/2C/2C.3)**:
   * Android (`Realme RMX3870`, Android 16/SDK 36) connected to Arch Linux daemon (`archnoir`) over local Wi-Fi.
-  * Mutual AKE completed, SAS computed (`049968`), Ed25519 signatures verified, and AEAD session reached `ESTABLISHED` with `● Secure` badge in UI.
+  * Mutual AKE completed, SAS computed, Ed25519 signatures verified, and AEAD session reached `ESTABLISHED` with `● Secure` badge in UI.
 
 ---
 
@@ -81,7 +86,7 @@ This document is the primary persistent context file for **Ferry**. It reflects 
 
 ### Linux
 ```bash
-# Run all unit and integration tests (53 tests)
+# Run all unit and integration tests (127 tests)
 PYTHONPATH=linux/src python3 -m unittest discover -s linux/tests -v
 
 # Run desktop UI with discovery active
@@ -110,14 +115,15 @@ adb shell am start -n dev.ferry.app/.MainActivity
 
 ## 6. Known Limitations & Phase Boundary
 
-* **No File Transfer Engine (Phase 3)**: Data streaming channels and SAF file I/O will follow after pairing UX is complete.
+* **No File Selection UI (Phase 3B)**: File selection UX via file pickers (Android Intent/SAF and GTK FileChooser) is not yet implemented.
+* **No Resumption (Phase 3C)**: File transfer resumption and explicit cancellation (other than connection drop) are pending.
 
 ---
 
 ## 7. Next Recommended Task
 
-* **Begin Phase 2C (Trust & Pairing UX, Keystore Migration)**:
-  * Implement GNOME-style desktop notification / Libadwaita dialog and Compose pairing UI for interactive SAS verification.
-  * Implement mutual `PAIRING_DECISION` acceptance flow before persisting trust.
-  * Migrate Android Ed25519 identity key generation to hardware-backed `AndroidKeyStore`.
-
+* **Wait for Physical Verification (Phase 3A)**: Complete the Android-Linux physical file transfer validation before proceeding.
+* **Begin Phase 3B (Sender & Receiver UI)**:
+  - Implement Android SAF `ACTION_OPEN_DOCUMENT` and `ACTION_SEND` intent handlers to select files to send.
+  - Implement GTK4 `Gtk.FileDialog` for selecting files on Linux.
+  - Wire UI actions to the `FerryService.send_file()` and Android's `FerryTransferClient.streamChunks()`.

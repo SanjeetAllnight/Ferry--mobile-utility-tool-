@@ -24,9 +24,24 @@ from .db import DatabaseManager, TrustedDevice
 from .discovery import DiscoveredDevice, DiscoveryManager
 from .identity import IdentityManager
 from .session import FerrySession, HandshakeData, SessionState
+from .transfer import (
+    CHUNK_MAGIC,
+    IncomingTransfer,
+    OutgoingTransfer,
+    TransferMetadata,
+    TransferState,
+    is_chunk_frame,
+    decode_chunk_frame,
+)
 from ..protocol.models import (
     FerryEnvelope,
     MessageType,
+    TransferRequestPayload,
+    TransferAcceptPayload,
+    TransferRejectPayload,
+    TransferCompletePayload,
+    TransferResultPayload,
+    TransferErrorPayload,
     decode_frame,
     encode_frame,
 )
@@ -78,6 +93,8 @@ class FerryService:
         self._active_tasks: Set[asyncio.Task] = set()
         self._active_sessions: Dict[str, PeerSession] = {}  # remote_addr -> PeerSession
         self._session_listeners: list[Callable[[str, SessionState], None]] = []
+        # Active incoming transfers keyed by transfer_id
+        self._incoming_transfers: Dict[str, IncomingTransfer] = {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -136,6 +153,96 @@ class FerryService:
         except Exception:
             pass
         self._disconnect_session(ps)
+
+    async def send_file(self, remote_addr: str, source_path: "Path") -> bool:
+        """
+        Initiate an outgoing file transfer to an already-ESTABLISHED peer.
+
+        Returns True if the receiver accepted and the transfer completed with
+        verified integrity.  Returns False on reject, cancellation, or error.
+
+        Phase 3A MVP: single active transfer.  A second call while a transfer
+        is in progress will raise RuntimeError.
+        """
+        ps = self._active_sessions.get(remote_addr)
+        if ps is None:
+            raise RuntimeError(f"No active session for {remote_addr}")
+        if ps.state != SessionState.ESTABLISHED:
+            raise RuntimeError(f"Session {remote_addr} is not ESTABLISHED (state={ps.state})")
+
+        xfer = OutgoingTransfer(
+            source_path=source_path,
+            receiver_identity=ps.remote_static_pub_b64 or "",
+        )
+        meta = xfer.build_metadata(sender_identity=self.identity.public_key_b64)
+
+        # Send TRANSFER_REQUEST
+        await self.send_encrypted(ps, MessageType.TRANSFER_REQUEST, meta.to_dict())
+        logger.info(
+            "TRANSFER_REQUEST sent to %s: %s (%d bytes)",
+            ps.remote_device_name, meta.file_name, meta.file_size,
+        )
+
+        # Wait for TRANSFER_ACCEPT or TRANSFER_REJECT (max 60s)
+        response = await asyncio.wait_for(
+            self._wait_for_transfer_response(ps, meta.transfer_id),
+            timeout=60.0,
+        )
+        if response != "ACCEPT":
+            logger.info("Transfer %s rejected or timed out", meta.transfer_id[:8])
+            return False
+
+        logger.info("Transfer %s accepted — streaming chunks", meta.transfer_id[:8])
+
+        # Stream chunks
+        async for chunk_frame_bytes in xfer.stream_chunks():
+            encrypted = ps.session.encrypt_frame(chunk_frame_bytes)
+            ps.writer.write(encrypted)
+            await ps.writer.drain()
+
+        # Send TRANSFER_COMPLETE
+        await self.send_encrypted(
+            ps, MessageType.TRANSFER_COMPLETE, {"transfer_id": meta.transfer_id}
+        )
+        logger.info("TRANSFER_COMPLETE sent for %s", meta.transfer_id[:8])
+
+        # Wait for TRANSFER_RESULT
+        try:
+            result = await asyncio.wait_for(
+                self._wait_for_transfer_result(ps, meta.transfer_id),
+                timeout=60.0,
+            )
+            if result:
+                logger.info("Transfer %s completed successfully", meta.transfer_id[:8])
+            else:
+                logger.error("Transfer %s failed integrity check on receiver", meta.transfer_id[:8])
+            return result
+        except asyncio.TimeoutError:
+            logger.error("Timed out waiting for TRANSFER_RESULT for %s", meta.transfer_id[:8])
+            return False
+
+    async def _wait_for_transfer_response(self, ps: "PeerSession", transfer_id: str) -> str:
+        """Block until we receive TRANSFER_ACCEPT or TRANSFER_REJECT for this transfer_id."""
+        # We use an asyncio.Event per transfer stored in ps
+        if not hasattr(ps, "_transfer_events"):
+            ps._transfer_events = {}
+        event: asyncio.Event = asyncio.Event()
+        result_holder: list[str] = []
+        ps._transfer_events[transfer_id] = (event, result_holder)
+        await event.wait()
+        del ps._transfer_events[transfer_id]
+        return result_holder[0] if result_holder else "REJECT"
+
+    async def _wait_for_transfer_result(self, ps: "PeerSession", transfer_id: str) -> bool:
+        """Block until we receive TRANSFER_RESULT for this transfer_id."""
+        if not hasattr(ps, "_result_events"):
+            ps._result_events = {}
+        event: asyncio.Event = asyncio.Event()
+        result_holder: list[bool] = []
+        ps._result_events[transfer_id] = (event, result_holder)
+        await event.wait()
+        del ps._result_events[transfer_id]
+        return result_holder[0] if result_holder else False
 
     def _persist_trust(self, ps: PeerSession) -> None:
         """Persist trust for a paired peer."""
@@ -493,6 +600,12 @@ class FerryService:
                     break
 
                 plaintext = ps.session.decrypt_frame(frame_data)
+
+                # TRANSFER_CHUNK frames use binary framing (FYCH magic), not JSON
+                if is_chunk_frame(plaintext):
+                    await self._on_chunk_received(plaintext)
+                    continue
+
                 envelope = FerryEnvelope.from_json(plaintext.decode("utf-8"))
 
                 if envelope.type == MessageType.DISCONNECT:
@@ -516,7 +629,7 @@ class FerryService:
                     continue
 
                 logger.debug("Received encrypted message type=%s from %s", envelope.type, ps.remote_addr)
-                # Future: route to transfer handler etc.
+                await self._handle_transfer_message(ps, envelope)
 
         except asyncio.TimeoutError:
             logger.info("Session idle timeout with %s", ps.remote_addr)
@@ -525,6 +638,141 @@ class FerryService:
         finally:
             ps.session.transition(SessionState.CLOSING)
             ps.session.transition(SessionState.DISCONNECTED)
+
+    async def _on_chunk_received(self, plaintext: bytes) -> None:
+        """Receiver side: process a binary TRANSFER_CHUNK frame."""
+        try:
+            chunk = decode_chunk_frame(plaintext)
+        except ValueError as exc:
+            logger.error("Malformed TRANSFER_CHUNK: %s", exc)
+            return
+
+        incoming = self._incoming_transfers.get(chunk.transfer_id)
+        if not incoming:
+            logger.warning(
+                "TRANSFER_CHUNK for unknown transfer_id %s (seq=%d)",
+                chunk.transfer_id[:8], chunk.seq,
+            )
+            return
+
+        try:
+            incoming.receive_chunk(chunk)
+        except (ValueError, RuntimeError) as exc:
+            logger.error(
+                "Error processing chunk seq=%d for transfer %s: %s",
+                chunk.seq, chunk.transfer_id[:8], exc,
+            )
+            incoming.cancel()
+            self._incoming_transfers.pop(chunk.transfer_id, None)
+
+    async def _handle_transfer_message(self, ps: "PeerSession", envelope: FerryEnvelope) -> None:
+        """Dispatch a decrypted transfer control message to the appropriate handler."""
+        msg_type = envelope.type
+        payload = envelope.payload
+        transfer_id = payload.get("transfer_id", "")
+
+        if msg_type == MessageType.TRANSFER_REQUEST:
+            await self._on_transfer_request(ps, payload)
+
+        elif msg_type == MessageType.TRANSFER_ACCEPT:
+            # Unblock send_file() waiting for accept
+            self._signal_transfer_event(ps, "_transfer_events", transfer_id, "ACCEPT")
+
+        elif msg_type == MessageType.TRANSFER_REJECT:
+            self._signal_transfer_event(ps, "_transfer_events", transfer_id, "REJECT")
+
+        elif msg_type == MessageType.TRANSFER_COMPLETE:
+            await self._on_transfer_complete(ps, transfer_id)
+
+        elif msg_type == MessageType.TRANSFER_RESULT:
+            success = bool(payload.get("success", False))
+            self._signal_transfer_event(ps, "_result_events", transfer_id, success)
+
+        elif msg_type == MessageType.TRANSFER_CANCEL:
+            await self._on_transfer_cancel(ps, transfer_id, payload.get("reason", ""))
+
+        elif msg_type == MessageType.TRANSFER_ERROR:
+            logger.error(
+                "Transfer error from %s: [%s] %s",
+                ps.remote_addr,
+                payload.get("error_code", ""),
+                payload.get("message", ""),
+            )
+            self._cancel_incoming_transfer(transfer_id)
+
+        else:
+            logger.warning("Unhandled message type %s from %s", msg_type, ps.remote_addr)
+
+    def _signal_transfer_event(self, ps: "PeerSession", attr: str, transfer_id: str, value) -> None:
+        events = getattr(ps, attr, {})
+        entry = events.get(transfer_id)
+        if entry:
+            event, holder = entry
+            holder.append(value)
+            event.set()
+
+    async def _on_transfer_request(self, ps: "PeerSession", payload: dict) -> None:
+        """Receiver side: handle an incoming TRANSFER_REQUEST."""
+        # Phase 3A: auto-accept for trusted peers (UI integration in Phase 3B)
+        try:
+            meta = TransferMetadata.from_dict(payload)
+        except (ValueError, KeyError) as exc:
+            logger.error("Invalid TRANSFER_REQUEST from %s: %s", ps.remote_addr, exc)
+            await self.send_encrypted(
+                ps, MessageType.TRANSFER_ERROR,
+                {"transfer_id": payload.get("transfer_id", ""),
+                 "error_code": "INVALID_REQUEST", "message": str(exc)}
+            )
+            return
+
+        # Reject if already handling a transfer (MVP single-transfer limit)
+        if self._incoming_transfers:
+            logger.warning("Busy — rejecting transfer %s from %s", meta.transfer_id[:8], ps.remote_addr)
+            await self.send_encrypted(
+                ps, MessageType.TRANSFER_REJECT,
+                {"transfer_id": meta.transfer_id, "reason": "BUSY"}
+            )
+            return
+
+        staging_dir = Path(self.config.download_dir) / "staging"
+        incoming = IncomingTransfer(meta=meta, staging_dir=staging_dir)
+        self._incoming_transfers[meta.transfer_id] = incoming
+
+        incoming.begin()
+        await self.send_encrypted(
+            ps, MessageType.TRANSFER_ACCEPT, {"transfer_id": meta.transfer_id}
+        )
+        logger.info(
+            "TRANSFER_ACCEPT sent for %s from %s",
+            meta.file_name, ps.remote_addr,
+        )
+
+    async def _on_transfer_complete(self, ps: "PeerSession", transfer_id: str) -> None:
+        """Receiver side: sender says all chunks sent — verify integrity."""
+        incoming = self._incoming_transfers.get(transfer_id)
+        if not incoming:
+            logger.warning("TRANSFER_COMPLETE for unknown transfer_id %s", transfer_id[:8])
+            return
+
+        success = incoming.finalise()
+        sha256 = incoming.meta.sha256 if success else ""
+        await self.send_encrypted(
+            ps, MessageType.TRANSFER_RESULT,
+            {"transfer_id": transfer_id, "success": success, "sha256": sha256}
+        )
+        self._incoming_transfers.pop(transfer_id, None)
+
+    async def _on_transfer_cancel(self, ps: "PeerSession", transfer_id: str, reason: str) -> None:
+        logger.info(
+            "TRANSFER_CANCEL received for %s from %s (reason=%s)",
+            transfer_id[:8] if transfer_id else "?", ps.remote_addr, reason
+        )
+        self._cancel_incoming_transfer(transfer_id)
+
+    def _cancel_incoming_transfer(self, transfer_id: str) -> None:
+        incoming = self._incoming_transfers.pop(transfer_id, None)
+        if incoming:
+            incoming.cancel()
 
     # ------------------------------------------------------------------
     # Frame I/O helpers

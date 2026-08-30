@@ -132,6 +132,161 @@ class TestControlPlaneIntegration(unittest.IsolatedAsyncioTestCase):
             f"Service B should reach ESTABLISHED. States seen: {b_states}"
         )
 
+    async def test_pairing_both_accept_remote_first(self) -> None:
+        """When peer B accepts before peer A, both must still reach ESTABLISHED and persist trust."""
+        from ferry_linux.core.discovery import DiscoveredDevice
+
+        device_b = DiscoveredDevice(
+            device_id=self.svc_b.config.device_id,
+            device_name=self.svc_b.config.device_name,
+            device_type="desktop",
+            os_name="archlinux",
+            port=self.port_b,
+            addresses=["127.0.0.1"],
+            protocol_version=1,
+            service_name="Ferry-test-b",
+        )
+
+        asyncio.create_task(self.svc_a.connect_to_peer(device_b))
+        await asyncio.sleep(0.5)
+
+        addr_b = f"{device_b.addresses[0]}:{device_b.port}"
+        ps_a = self.svc_a._active_sessions.get(addr_b)
+        self.assertIsNotNone(ps_a)
+        ps_b = list(self.svc_b._active_sessions.values())[0]
+
+        # Peer B accepts first -> sends ACCEPT to A
+        await self.svc_b.accept_pairing(ps_b.remote_addr)
+        await asyncio.sleep(0.2)
+
+        # A receives ACCEPT, should be in WAITING_FOR_LOCAL_DECISION
+        self.assertEqual(ps_a.session.state, SessionState.WAITING_FOR_LOCAL_DECISION)
+
+        # Now peer A accepts
+        await self.svc_a.accept_pairing(ps_a.remote_addr)
+        await asyncio.sleep(0.5)
+
+        self.assertEqual(ps_a.session.state, SessionState.ESTABLISHED)
+        self.assertEqual(ps_b.session.state, SessionState.ESTABLISHED)
+        self.assertIsNotNone(self.svc_a.db.get_device_by_public_key(self.svc_b.identity.public_key_b64))
+        self.assertIsNotNone(self.svc_b.db.get_device_by_public_key(self.svc_a.identity.public_key_b64))
+
+    async def test_pairing_local_accept_remote_reject(self) -> None:
+        """When local accepts but remote rejects, no trust is persisted and session fails/disconnects."""
+        from ferry_linux.core.discovery import DiscoveredDevice
+
+        device_b = DiscoveredDevice(
+            device_id=self.svc_b.config.device_id,
+            device_name=self.svc_b.config.device_name,
+            device_type="desktop",
+            os_name="archlinux",
+            port=self.port_b,
+            addresses=["127.0.0.1"],
+            protocol_version=1,
+            service_name="Ferry-test-b",
+        )
+
+        asyncio.create_task(self.svc_a.connect_to_peer(device_b))
+        await asyncio.sleep(0.5)
+
+        addr_b = f"{device_b.addresses[0]}:{device_b.port}"
+        ps_a = self.svc_a._active_sessions.get(addr_b)
+        self.assertIsNotNone(ps_a)
+        ps_b = list(self.svc_b._active_sessions.values())[0]
+
+        # A accepts locally -> waiting for remote
+        await self.svc_a.accept_pairing(ps_a.remote_addr)
+        await asyncio.sleep(0.1)
+
+        # B rejects
+        await self.svc_b.reject_pairing(ps_b.remote_addr)
+        await asyncio.sleep(0.5)
+
+        # Neither should persist trust
+        self.assertIsNone(self.svc_a.db.get_device_by_public_key(self.svc_b.identity.public_key_b64))
+        self.assertIsNone(self.svc_b.db.get_device_by_public_key(self.svc_a.identity.public_key_b64))
+        self.assertNotEqual(ps_a.session.state, SessionState.ESTABLISHED)
+
+    async def test_pairing_remote_accept_local_reject(self) -> None:
+        """When remote accepts but local rejects, no trust is persisted."""
+        from ferry_linux.core.discovery import DiscoveredDevice
+
+        device_b = DiscoveredDevice(
+            device_id=self.svc_b.config.device_id,
+            device_name=self.svc_b.config.device_name,
+            device_type="desktop",
+            os_name="archlinux",
+            port=self.port_b,
+            addresses=["127.0.0.1"],
+            protocol_version=1,
+            service_name="Ferry-test-b",
+        )
+
+        asyncio.create_task(self.svc_a.connect_to_peer(device_b))
+        await asyncio.sleep(0.5)
+
+        addr_b = f"{device_b.addresses[0]}:{device_b.port}"
+        ps_a = self.svc_a._active_sessions.get(addr_b)
+        self.assertIsNotNone(ps_a)
+        ps_b = list(self.svc_b._active_sessions.values())[0]
+
+        # B accepts first
+        await self.svc_b.accept_pairing(ps_b.remote_addr)
+        await asyncio.sleep(0.2)
+
+        # A rejects
+        await self.svc_a.reject_pairing(ps_a.remote_addr)
+        await asyncio.sleep(0.5)
+
+        self.assertIsNone(self.svc_a.db.get_device_by_public_key(self.svc_b.identity.public_key_b64))
+        self.assertIsNone(self.svc_b.db.get_device_by_public_key(self.svc_a.identity.public_key_b64))
+
+    async def test_unpair_device_requires_new_pairing(self) -> None:
+        """Unpairing a device must force future connections to require pairing again."""
+        from ferry_linux.core.discovery import DiscoveredDevice
+
+        device_b = DiscoveredDevice(
+            device_id=self.svc_b.config.device_id,
+            device_name=self.svc_b.config.device_name,
+            device_type="desktop",
+            os_name="archlinux",
+            port=self.port_b,
+            addresses=["127.0.0.1"],
+            protocol_version=1,
+            service_name="Ferry-test-b",
+        )
+
+        # Pair once
+        asyncio.create_task(self.svc_a.connect_to_peer(device_b))
+        await asyncio.sleep(0.5)
+        addr_b = f"{device_b.addresses[0]}:{device_b.port}"
+        ps_a = self.svc_a._active_sessions.get(addr_b)
+        ps_b = list(self.svc_b._active_sessions.values())[0]
+        await self.svc_a.accept_pairing(ps_a.remote_addr)
+        await self.svc_b.accept_pairing(ps_b.remote_addr)
+        await asyncio.sleep(0.5)
+
+        self.assertIsNotNone(self.svc_a.db.get_device_by_public_key(self.svc_b.identity.public_key_b64))
+
+        # Close session
+        try:
+            ps_a.writer.close()
+            await ps_a.writer.wait_closed()
+        except Exception:
+            pass
+        await asyncio.sleep(0.2)
+
+        # Unpair on A
+        self.svc_a.db.remove_device_by_public_key(self.svc_b.identity.public_key_b64)
+        self.assertIsNone(self.svc_a.db.get_device_by_public_key(self.svc_b.identity.public_key_b64))
+
+        # Reconnect — A should now enter PAIRING instead of ESTABLISHED
+        asyncio.create_task(self.svc_a.connect_to_peer(device_b))
+        await asyncio.sleep(0.5)
+        ps_a2 = self.svc_a._active_sessions.get(addr_b)
+        self.assertIsNotNone(ps_a2)
+        self.assertEqual(ps_a2.session.state, SessionState.PAIRING)
+
     async def test_reconnect_uses_persisted_trust(self) -> None:
         """After first pairing, reconnect should reach ESTABLISHED without new pairing."""
         from ferry_linux.core.discovery import DiscoveredDevice

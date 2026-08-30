@@ -50,9 +50,8 @@ class FerryApplication(Adw.Application):
         self._thread = threading.Thread(target=run_asyncio, daemon=True)
         self._thread.start()
 
-    def _on_devices_changed(self) -> None:
+    def _on_devices_changed(self, devices: list) -> None:
         if self.service and self.window:
-            devices = self.service.discovered_devices
             GLib.idle_add(self.window.update_discovered_devices, devices)
 
     def _on_session_changed(self, remote_addr: str, state) -> None:

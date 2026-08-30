@@ -125,44 +125,56 @@ Signals local user acceptance of the SAS verification PIN.
 
 ---
 
-### 3.3. File Transfer Messages
+### 3.3. File Transfer Messages (Phase 3A)
 
-#### `TRANSFER_REQUEST`
-Sender requests permission to transmit one or more files.
+**Architecture:** All transfer control and data messages flow in-band over the existing AEAD-encrypted TCP session (ADR 007). No separate data connection is used.
+
+**Binary vs. JSON frames:** Control messages use the standard `FerryEnvelope` JSON structure. Data messages (`TRANSFER_CHUNK`) use a binary frame whose decrypted plaintext begins with the magic bytes `FYCH` instead of `{`, allowing the session loop to dispatch them without JSON parsing.
+
+#### Binary TRANSFER_CHUNK Frame Layout (inside AEAD plaintext)
+
+```
++----------+----------------------+-------------------+--------------------+-------------------+
+| 4 bytes  | 16 bytes             | 4 bytes           | 4 bytes            | N bytes           |
+| "FYCH"   | Transfer UUID bytes  | Seq (uint32 BE)   | Payload len (BE)   | Raw chunk data    |
++----------+----------------------+-------------------+--------------------+-------------------+
+```
+
+Total header: 28 bytes. Maximum chunk payload: 65,536 bytes (64 KiB).
+
+#### `TRANSFER_REQUEST` (sender → receiver)
+
+Metadata for one file. Sent as a standard JSON envelope.
+
 ```json
 {
   "type": "TRANSFER_REQUEST",
   "payload": {
     "transfer_id": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
-    "items": [
-      {
-        "item_id": "item-1",
-        "file_name": "document.pdf",
-        "file_size": 2458920,
-        "mime_type": "application/pdf",
-        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-      }
-    ],
-    "total_bytes": 2458920
+    "file_name": "document.pdf",
+    "file_size": 2458920,
+    "mime_type": "application/pdf",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "chunk_size": 65536,
+    "chunk_count": 38,
+    "sender_identity": "base64url_ed25519_public_key",
+    "created_at": 1724932800000,
+    "protocol_version": 1
   }
 }
 ```
 
-#### `TRANSFER_ACCEPT`
-Receiver accepts the transfer request and specifies data port/channel.
+#### `TRANSFER_ACCEPT` (receiver → sender)
+
 ```json
 {
   "type": "TRANSFER_ACCEPT",
-  "payload": {
-    "transfer_id": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
-    "accepted_items": ["item-1"],
-    "data_stream_port": 53771
-  }
+  "payload": { "transfer_id": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d" }
 }
 ```
 
-#### `TRANSFER_REJECT`
-Receiver rejects the transfer request.
+#### `TRANSFER_REJECT` (receiver → sender)
+
 ```json
 {
   "type": "TRANSFER_REJECT",
@@ -173,14 +185,19 @@ Receiver rejects the transfer request.
 }
 ```
 
-#### `TRANSFER_PROGRESS`
-Periodically updates the peer on transmission status.
+Reason codes: `USER_REJECTED`, `BUSY`, `INSUFFICIENT_STORAGE`, `INVALID_REQUEST`.
+
+#### `TRANSFER_CHUNK` (sender → receiver) — Binary Frame
+
+Carries raw file data. The decrypted plaintext begins with `FYCH` magic (not `{`). See binary frame layout above.
+
+#### `TRANSFER_PROGRESS` (sender → receiver) — Optional
+
 ```json
 {
   "type": "TRANSFER_PROGRESS",
   "payload": {
     "transfer_id": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
-    "item_id": "item-1",
     "bytes_transferred": 1048576,
     "total_bytes": 2458920,
     "speed_bytes_per_sec": 52428800
@@ -188,8 +205,8 @@ Periodically updates the peer on transmission status.
 }
 ```
 
-#### `TRANSFER_CANCEL`
-Either peer cancels an active or queued transfer.
+#### `TRANSFER_CANCEL` (either direction)
+
 ```json
 {
   "type": "TRANSFER_CANCEL",
@@ -200,29 +217,43 @@ Either peer cancels an active or queued transfer.
 }
 ```
 
-#### `TRANSFER_COMPLETE`
-Receiver confirms all data was received and verified via SHA-256 digest.
+#### `TRANSFER_COMPLETE` (sender → receiver)
+
+Sent after all chunks have been written. Signals the receiver to verify SHA-256.
+
 ```json
 {
   "type": "TRANSFER_COMPLETE",
+  "payload": { "transfer_id": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d" }
+}
+```
+
+#### `TRANSFER_RESULT` (receiver → sender)
+
+Integrity verdict after final SHA-256 verification.
+
+```json
+{
+  "type": "TRANSFER_RESULT",
   "payload": {
     "transfer_id": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
-    "item_id": "item-1",
-    "status": "VERIFIED",
+    "success": true,
     "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
   }
 }
 ```
 
-#### `TRANSFER_ERROR`
-Sent when a fatal stream error or integrity failure occurs.
+#### `TRANSFER_ERROR` (either direction)
+
+Fatal error, either side may send at any time during a transfer.
+
 ```json
 {
   "type": "TRANSFER_ERROR",
   "payload": {
     "transfer_id": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
     "error_code": "INTEGRITY_MISMATCH",
-    "message": "Calculated SHA-256 digest does not match expected metadata."
+    "message": "SHA-256 verification failed"
   }
 }
 ```
@@ -235,31 +266,41 @@ Sent when a fatal stream error or integrity failure occurs.
                     ┌──────────────┐
                     │     IDLE     │
                     └──────┬───────┘
-                           │ Send/Receive TRANSFER_REQUEST
+                           │ TRANSFER_REQUEST sent/received
                            ▼
                     ┌──────────────┐
-            ┌───────┤   PENDING    ├────────┐
+            ┌───────┤   REQUESTED  ├────────┐
             │       └──────┬───────┘        │
- User Reject│              │ User Accept    │ Timeout / Cancel
-            ▼              ▼                ▼
-     ┌────────────┐ ┌──────────────┐ ┌─────────────┐
-     │  REJECTED  │ │ IN_PROGRESS  │ │  CANCELLED  │
-     └────────────┘ └──────┬───────┘ └─────────────┘
-                           │
-                 Stream Data & Progress
-                           │
-              ┌────────────┴────────────┐
-              │                         │
-     Checksum Verified        Checksum Mismatch / Error
-              ▼                         ▼
-       ┌─────────────┐           ┌─────────────┐
-       │  COMPLETED  │           │   FAILED    │
-       └─────────────┘           └─────────────┘
+ Reject/    │              │ TRANSFER_ACCEPT │ TRANSFER_CANCEL
+ Error      ▼              ▼                ▼
+      ┌──────────┐  ┌──────────────┐  ┌───────────┐
+      │ REJECTED │  │  TRANSFERRING│  │ CANCELLED │
+      └──────────┘  └──────┬───────┘  └───────────┘
+                           │ Chunks + TRANSFER_COMPLETE
+                           │ → receiver computes SHA-256
+                    ┌──────┴──────────────┐
+                    │                     │
+          SHA-256 pass              SHA-256 fail
+                    ▼                     ▼
+             ┌──────────┐          ┌──────────┐
+             │ COMPLETED│          │  FAILED  │
+             └──────────┘          └──────────┘
 ```
 
 ---
 
-## 5. Standard Error Codes
+## 5. Transfer Security Properties
+
+- Transfer messages are only processed in `ESTABLISHED` sessions (post-authentication).
+- `TRANSFER_CHUNK` frames inherit all security from the AEAD session (ChaCha20-Poly1305): confidentiality, integrity, authentication, and replay protection via nonce counter.
+- Remote-supplied `file_name` fields are treated as untrusted basenames: all path separators stripped before filesystem use.
+- Temp files (`<transfer_id>.part`) are only atomically renamed after SHA-256 passes.
+- A failed integrity check causes temp file deletion; no partial file is exposed.
+- Phase 3A: one active transfer at a time; additional requests are rejected with `BUSY`.
+
+---
+
+## 6. Standard Error Codes
 
 * `ERR_UNKNOWN_MESSAGE`: Message type not supported in this protocol version.
 * `ERR_UNAUTHORIZED`: Attempted transfer on an unpaired or unauthenticated connection.
@@ -268,3 +309,4 @@ Sent when a fatal stream error or integrity failure occurs.
 * `ERR_IO_FAILURE`: Disk write or read failure.
 * `ERR_INTEGRITY_MISMATCH`: Final SHA-256 verification failed.
 * `ERR_TIMEOUT`: Peer failed to respond within required window.
+

@@ -6,6 +6,8 @@ import dev.ferry.app.discovery.DiscoveredDevice
 import dev.ferry.app.protocol.ProtocolConstants
 import dev.ferry.app.security.FerryIdentity
 import dev.ferry.app.security.FerrySession
+import dev.ferry.app.transfer.FerryTransferReceiver
+import dev.ferry.app.transfer.TransferMetadata
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -17,6 +19,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
+import java.io.File
 import java.io.InputStream
 import java.io.OutputStream
 import java.net.Socket
@@ -71,6 +74,15 @@ class FerryControlClient(
     private var socket: Socket? = null
     private var sessionJob: Job? = null
     private var session: FerrySession? = null
+
+    // Active incoming transfer (Phase 3A MVP: one at a time)
+    private var activeReceiver: FerryTransferReceiver? = null
+    private val stagingDir: File get() = File(
+        android.os.Environment.getExternalStoragePublicDirectory(
+            android.os.Environment.DIRECTORY_DOWNLOADS
+        ),
+        "Ferry/staging"
+    )
 
     // ------------------------------------------------------------------
     // Public API
@@ -292,6 +304,13 @@ class FerryControlClient(
             while (true) {
                 val frameBytes = readAeadFrameBytes(input) ?: break
                 val plaintext = sess.decryptFrame(frameBytes)
+
+                // Binary TRANSFER_CHUNK frames start with FYCH magic — not JSON
+                if (FerryTransferReceiver.isChunkFrame(plaintext)) {
+                    onChunkReceived(plaintext)
+                    continue
+                }
+
                 val envelope = JSONObject(String(plaintext, Charsets.UTF_8))
                 val type = envelope.getString("type")
 
@@ -321,7 +340,7 @@ class FerryControlClient(
                 }
 
                 Log.d(TAG, "Received encrypted message: type=$type")
-                // Future: route to transfer handler
+                handleTransferMessage(sess, output, type, envelope.getJSONObject("payload"))
             }
         } catch (e: Exception) {
             Log.e(TAG, "Encrypted session loop ended", e)
@@ -329,6 +348,117 @@ class FerryControlClient(
             try { sess.transition(FerrySession.State.CLOSING) } catch (_: Exception) {}
             try { sess.transition(FerrySession.State.DISCONNECTED) } catch (_: Exception) {}
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Transfer message routing (Phase 3A)
+    // ------------------------------------------------------------------
+
+    private fun onChunkReceived(plaintext: ByteArray) {
+        try {
+            val (transferId, seq, data) = FerryTransferReceiver.decodeChunkFrame(plaintext)
+            val receiver = activeReceiver
+            if (receiver == null) {
+                Log.w(TAG, "TRANSFER_CHUNK for unknown transfer_id ${transferId.take(8)} (seq=$seq)")
+                return
+            }
+            receiver.receiveChunk(transferId, seq, data)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error processing TRANSFER_CHUNK", e)
+            activeReceiver?.cancel()
+            activeReceiver = null
+        }
+    }
+
+    private fun handleTransferMessage(
+        sess: FerrySession,
+        output: OutputStream,
+        type: String,
+        payload: JSONObject,
+    ) {
+        val transferId = payload.optString("transfer_id", "")
+        when (type) {
+            ProtocolConstants.MessageTypes.TRANSFER_REQUEST -> {
+                onTransferRequest(sess, output, payload)
+            }
+            ProtocolConstants.MessageTypes.TRANSFER_COMPLETE -> {
+                onTransferComplete(sess, output, transferId)
+            }
+            ProtocolConstants.MessageTypes.TRANSFER_CANCEL -> {
+                Log.i(TAG, "TRANSFER_CANCEL received for ${transferId.take(8)}")
+                activeReceiver?.cancel()
+                activeReceiver = null
+            }
+            ProtocolConstants.MessageTypes.TRANSFER_ERROR -> {
+                Log.e(TAG, "TRANSFER_ERROR from peer: [${payload.optString("error_code")}] ${payload.optString("message")}")
+                activeReceiver?.cancel()
+                activeReceiver = null
+            }
+            else -> Log.w(TAG, "Unhandled transfer message type: $type")
+        }
+    }
+
+    private fun onTransferRequest(sess: FerrySession, output: OutputStream, payload: JSONObject) {
+        // Phase 3A: auto-accept for trusted peers (UI integration in Phase 3B)
+        val transferId = payload.optString("transfer_id", "")
+        if (activeReceiver != null) {
+            Log.w(TAG, "Busy — rejecting transfer ${transferId.take(8)}")
+            sendEncryptedMessage(sess, output, ProtocolConstants.MessageTypes.TRANSFER_REJECT,
+                org.json.JSONObject().apply {
+                    put("transfer_id", transferId)
+                    put("reason", "BUSY")
+                })
+            return
+        }
+        try {
+            val meta = TransferMetadata.fromJson(payload)
+            stagingDir.mkdirs()
+            val receiver = FerryTransferReceiver(meta, stagingDir)
+            activeReceiver = receiver
+            receiver.begin()
+            sendEncryptedMessage(sess, output, ProtocolConstants.MessageTypes.TRANSFER_ACCEPT,
+                org.json.JSONObject().apply { put("transfer_id", meta.transferId) })
+            Log.i(TAG, "TRANSFER_ACCEPT sent for ${meta.fileName}")
+        } catch (e: Exception) {
+            Log.e(TAG, "Invalid TRANSFER_REQUEST: ${e.message}")
+            sendEncryptedMessage(sess, output, ProtocolConstants.MessageTypes.TRANSFER_ERROR,
+                org.json.JSONObject().apply {
+                    put("transfer_id", transferId)
+                    put("error_code", "INVALID_REQUEST")
+                    put("message", e.message ?: "")
+                })
+        }
+    }
+
+    private fun onTransferComplete(sess: FerrySession, output: OutputStream, transferId: String) {
+        val receiver = activeReceiver
+        if (receiver == null) {
+            Log.w(TAG, "TRANSFER_COMPLETE for unknown transfer_id ${transferId.take(8)}")
+            return
+        }
+        val success = receiver.finalise()
+        activeReceiver = null
+        sendEncryptedMessage(sess, output, ProtocolConstants.MessageTypes.TRANSFER_RESULT,
+            org.json.JSONObject().apply {
+                put("transfer_id", transferId)
+                put("success", success)
+                put("sha256", if (success) receiver.let { "" } else "")
+            })
+    }
+
+    private fun sendEncryptedMessage(sess: FerrySession, output: OutputStream, type: String, payload: JSONObject) {
+        val envelope = JSONObject().apply {
+            put("protocol_version", ProtocolConstants.PROTOCOL_VERSION)
+            put("message_id", UUID.randomUUID().toString())
+            put("reply_to", JSONObject.NULL)
+            put("timestamp", System.currentTimeMillis())
+            put("type", type)
+            put("payload", payload)
+        }
+        val plaintext = envelope.toString().toByteArray(Charsets.UTF_8)
+        val frame = sess.encryptFrame(plaintext)
+        output.write(frame)
+        output.flush()
     }
 
     // ------------------------------------------------------------------

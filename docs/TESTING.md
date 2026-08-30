@@ -27,13 +27,17 @@ This document outlines the testing strategy, test layers, and verification comma
 * **Test Modules**:
   * `test_config.py`: Verifies XDG configuration directory resolution, default values, and JSON persistence.
   * `test_db.py`: Verifies SQLite schema creation, migrations, and CRUD operations for trusted devices and transfer history.
-  * `test_protocol_models.py`: Verifies protocol v1 binary framing (`FY` magic bytes + uint32 length header) and JSON envelope serialization/deserialization.
+  * `test_protocol_models.py`: Verifies protocol v1 binary framing (`FY` magic bytes + uint32 length header), JSON envelope serialization, and Phase 3A transfer payload types.
   * `test_discovery_models.py`: Verifies TXT property decoding, IP address parsing, and protocol version compatibility.
   * `test_discovery_manager.py`: Verifies `DiscoveryManager` listener callbacks, service state transitions (Add/Update/Remove), and self-suppression.
   * `test_discovery_integration.py`: Live local mDNS announcement and discovery loopback test using `AsyncZeroconf`.
+  * `test_identity.py`: Verifies Ed25519 identity key generation, file permissions (0600), signing, and verification.
+  * `test_session.py`: Verifies session state machine, X25519 DH exchange, HKDF key derivation, 6-digit SAS code derivation, and ChaCha20-Poly1305 AEAD framing.
+  * `test_control_plane.py`: Verifies end-to-end AKE, bidirectional interactive pairing flows, remote/local decision sequences, trust persistence, reconnection with pinned keys, and unpairing.
+  * `test_transfer.py`: Verifies Phase 3A file transfer state machine, chunk framing (`FYCH`), filename sanitization, incremental SHA-256 validation, and atomic staging lifecycle.
 
 ```bash
-# Run all Linux tests (20 tests)
+# Run all Linux tests (127 tests)
 PYTHONPATH=linux/src python3 -m unittest discover -s linux/tests -v
 ```
 
