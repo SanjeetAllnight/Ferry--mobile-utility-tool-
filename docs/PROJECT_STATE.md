@@ -5,7 +5,7 @@ This document is the primary persistent context file for **Ferry**. It reflects 
 ---
 
 ### Current Phase: Phase 3 (File Transfer Execution)
-**Status:** Phase 3E Complete
+**Status:** Phase 3E Implementation Complete (Verification Partial)
 **Goal:** Implement file transfer capabilities between paired devices.
 
 ### Phase 3 Progress Tracking:
@@ -18,7 +18,7 @@ This document is the primary persistent context file for **Ferry**. It reflects 
 - **Phase 3E (Resumable Transfer Architecture Design)**: Architecture design complete. See `docs/PHASE_3E_DESIGN.md`.
 - **Phase 3E Task 1 (Persistent Interrupted Transfer Foundation)**: Complete. Linux DB schema migrated to version 3 (7 new resume columns). `INTERRUPTED` state added to `TransferState` with `TRANSFERRING→INTERRUPTED` transition. `IncomingTransfer.interrupt()` and `interrupt_info()` implemented. `InterruptedTransferInfo` dataclass and 4 new `DatabaseManager` methods added (`save_interrupted_transfer`, `get_interrupted_transfer`, `list_interrupted_transfers_for_peer`, `expire_interrupted_transfers`). 22 new unit tests. 183/183 Linux tests passing.
 - **Phase 3E Task 2 (Resume Negotiation Protocol)**: Complete. Wire protocol models implemented for `TRANSFER_RESUME_REQUEST`, `TRANSFER_RESUME_ACCEPT`, `TRANSFER_RESUME_REJECT` with strict validation (UUID format, non-negative bounds, 64-char lowercase hex SHA-256, chunk alignment consistency, and explicit `ResumeRejectReason` enum). Implemented `IncomingTransfer.prepare_resume_request()` reading actual `.part` size from disk, verifying chunk boundaries, and streaming SHA-256 from disk without loading full file into memory. Added minimal service layer dispatch in `service.py`. 21 new unit tests (11 protocol model tests + 10 transfer tests).
-- **Phase 3E Task 3 (Resume Execution & UI)**: Complete and **Fully Verified**. Wired up state machine transitions for `RESUME_REQUESTED` and `RESUMING`. Sender side prefix-hash computation and chunk stream skipping implemented. UI actions wired for Linux and Android. Fixed critical bugs where `service.py` `start()` unconditionally deleted `.part` files, Android sender lacked persistence for `OUTGOING` interrupted transfers, and Linux UI/Receiver logic was missing. All components verified physically on real hardware (Android -> Linux physical interrupt and successful resume). **Phase 3E is CLOSED.**
+- **Phase 3E Task 3 (Resume Execution & UI)**: Implementation complete. Wired up state machine transitions for `RESUME_REQUESTED` and `RESUMING`. Sender side prefix-hash computation and chunk stream skipping implemented. UI actions wired for Linux and Android. **Physical Verification Status:** Android-originated resume path (Android as Receiver) has been manually verified and **passed**. Linux-originated resume path (Linux as Receiver) currently has a known issue and is **not passing**. Existing non-resume transfers remain functional. Automated tests (219/219 Linux, all Android tests) continue to pass. The Linux resume issue is **deferred** to a later phase. **Phase 3E implementation is closed (Partial Verification).**
 
 ### Previous Phase: Phase 2C (Interactive Trust & Identity Storage)
 **Status:** Complete / Verified
@@ -94,6 +94,7 @@ This document is the primary persistent context file for **Ferry**. It reflects 
   - Android `InterruptedTransferStore` SharedPreferences backing.
   - Interactive "Resume" and "Discard" UI buttons implemented natively on both GTK4 and Compose.
   - **219/219 Linux tests passing; Android tests passing.**
+  - **Physical Verification:** Android resume path verified. Linux resume path has a known issue (deferred). Existing non-resume transfers remain fully functional.
 
 ---
 
