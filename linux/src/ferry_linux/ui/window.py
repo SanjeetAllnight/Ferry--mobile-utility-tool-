@@ -36,6 +36,8 @@ class FerryMainWindow(Adw.ApplicationWindow):
 
         # Track active transfer UIs: transfer_id -> (row, progress_bar, label)
         self._active_transfer_rows: dict = {}
+        
+        self._pending_send_path: Optional[str] = None
 
         # Main vertical container
         main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
@@ -145,6 +147,7 @@ class FerryMainWindow(Adw.ApplicationWindow):
         devices = app.service.db.list_devices()
 
         self._send_btn.set_sensitive(bool(established))
+        self._check_pending_send()
 
         # Combine DB devices and active established sessions
         known_dev_ids = {d.device_id for d in devices}
@@ -385,6 +388,32 @@ class FerryMainWindow(Adw.ApplicationWindow):
 
         dialog.connect("response", on_response)
         dialog.present()
+
+    def handle_pending_send(self, file_path: str) -> None:
+        """Called when a file is passed via command line arguments/Share."""
+        self._pending_send_path = file_path
+        self._check_pending_send()
+
+    def _check_pending_send(self) -> None:
+        """If there is a pending send path and an established session, send it."""
+        if not self._pending_send_path:
+            return
+            
+        app = self.get_application()
+        if not app or not app.service:
+            return
+            
+        established = list(app.service.established_sessions.keys())
+        if established:
+            # We have an active connection, automatically send!
+            remote_addr = established[0]
+            path_to_send = self._pending_send_path
+            self._pending_send_path = None
+            
+            asyncio.run_coroutine_threadsafe(
+                app.service.send_file(remote_addr, Path(path_to_send)),
+                app.get_loop()
+            )
 
     # ── Active transfer progress ──────────────────────────────────────────────
 

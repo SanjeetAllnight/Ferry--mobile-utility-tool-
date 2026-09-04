@@ -43,6 +43,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -66,6 +67,8 @@ import kotlinx.coroutines.launch
 fun FerryApp(
     discoveryEngine: FerryDiscoveryEngine? = null,
     controlClient: FerryControlClient? = null,
+    sharedUri: Uri? = null,
+    onSharedUriHandled: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -96,14 +99,21 @@ fun FerryApp(
 
     val isEstablished = sessionState == FerrySession.State.ESTABLISHED
 
-    // SAF file picker launcher
     val filePicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
     ) { uri: Uri? ->
-        if (uri != null && controlClient != null) {
+        if (uri != null) {
             scope.launch {
-                controlClient.sendFile(uri, context)
+                controlClient?.sendFile(uri, context)
             }
+        }
+    }
+
+    // Auto-send pending shared URI when connected
+    LaunchedEffect(sharedUri, isEstablished) {
+        if (sharedUri != null && isEstablished) {
+            controlClient?.sendFile(sharedUri, context)
+            onSharedUriHandled()
         }
     }
 
@@ -395,6 +405,30 @@ fun FerryApp(
                         )
                         transferHistory.take(10).forEach { entry ->
                             TransferHistoryRow(entry)
+                        }
+                    }
+                }
+            }
+            if (sharedUri != null && !isEstablished) {
+                Card(
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(16.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.Send,
+                            contentDescription = "Pending Share",
+                            tint = MaterialTheme.colorScheme.onTertiaryContainer
+                        )
+                        Column(modifier = Modifier.padding(start = 16.dp).weight(1f)) {
+                            Text("Pending Share", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onTertiaryContainer)
+                            Text("Connect to a device to send", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onTertiaryContainer)
+                        }
+                        TextButton(onClick = onSharedUriHandled) {
+                            Text("Cancel", color = MaterialTheme.colorScheme.onTertiaryContainer)
                         }
                     }
                 }

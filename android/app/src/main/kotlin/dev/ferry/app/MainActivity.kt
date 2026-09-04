@@ -11,6 +11,9 @@ import dev.ferry.app.net.FerryTrustStore
 import dev.ferry.app.security.FerryIdentity
 import dev.ferry.app.ui.FerryApp
 import dev.ferry.app.ui.theme.FerryTheme
+import android.content.Intent
+import android.net.Uri
+import androidx.compose.runtime.mutableStateOf
 
 class MainActivity : ComponentActivity() {
 
@@ -22,6 +25,8 @@ class MainActivity : ComponentActivity() {
     private lateinit var identity: FerryIdentity
     private lateinit var trustStore: FerryTrustStore
     private lateinit var controlClient: FerryControlClient
+
+    private val sharedUri = mutableStateOf<Uri?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -38,11 +43,15 @@ class MainActivity : ComponentActivity() {
                 "IdentityKey=${identity.publicKeyB64.take(12)}..."
         )
 
+        handleIntent(intent)
+
         setContent {
             FerryTheme {
                 FerryApp(
                     discoveryEngine = discoveryEngine,
                     controlClient = controlClient,
+                    sharedUri = sharedUri.value,
+                    onSharedUriHandled = { sharedUri.value = null }
                 )
             }
         }
@@ -58,6 +67,21 @@ class MainActivity : ComponentActivity() {
         if (isFinishing) {
             discoveryEngine.stop()
             controlClient.disconnect()
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        handleIntent(intent)
+    }
+
+    private fun handleIntent(intent: Intent?) {
+        if (intent?.action == Intent.ACTION_SEND) {
+            val uri = intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
+            if (uri != null) {
+                Log.i(TAG, "Received ACTION_SEND with URI: $uri")
+                sharedUri.value = uri
+            }
         }
     }
 }

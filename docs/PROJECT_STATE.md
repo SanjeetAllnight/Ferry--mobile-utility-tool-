@@ -4,7 +4,15 @@ This document is the primary persistent context file for **Ferry**. It reflects 
 
 ---
 
-### Current Phase: Phase 3 (File Transfer Execution)
+### Current Phase: Phase 4 (Advanced Transfers)
+**Status:** Phase 4B Complete (Share & Send Integration)
+**Goal:** Expand transfer capabilities with native OS integrations, multi-file sharing, and background sync.
+
+### Phase 4 Progress Tracking:
+- **Phase 4A (Multi-File & Directory Transfers)**: Not started.
+- **Phase 4B (Share & Send Integration)**: Complete. Native Android Share sheet (`ACTION_SEND`) and Linux GTK `do_open` application arguments intercept files and stream them seamlessly using the existing secure transfer pipelines. Auto-queues files if disconnected and sends upon reconnection. Physically verified bidirectional OS integration on real hardware. See `docs/PHASE_4B_REPORT.md`.
+
+### Previous Phase: Phase 3 (File Transfer Execution)
 **Status:** Phase 3E Implementation Complete (Verification Partial)
 **Goal:** Implement file transfer capabilities between paired devices.
 

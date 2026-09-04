@@ -20,7 +20,7 @@ class FerryApplication(Adw.Application):
     def __init__(self, app_id: str = "dev.ferry.Ferry") -> None:
         super().__init__(
             application_id=app_id,
-            flags=Gio.ApplicationFlags.FLAGS_NONE,
+            flags=Gio.ApplicationFlags.HANDLES_OPEN,
         )
         self.window: FerryMainWindow | None = None
         self.service = None
@@ -32,6 +32,14 @@ class FerryApplication(Adw.Application):
             self.window = FerryMainWindow(application=self)
             self._start_service()
         self.window.present()
+
+    def do_open(self, files: list, n_files: int, hint: str) -> None:
+        """Handle files passed via command line (or D-Bus)."""
+        self.do_activate()
+        if files and self.window:
+            file_path = files[0].get_path()
+            if file_path:
+                GLib.idle_add(self.window.handle_pending_send, file_path)
 
     def _start_service(self) -> None:
         from ..core.service import FerryService
