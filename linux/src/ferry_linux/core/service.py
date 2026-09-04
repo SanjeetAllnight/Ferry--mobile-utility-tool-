@@ -94,8 +94,13 @@ class FerryService:
         self._active_sessions: Dict[str, PeerSession] = {}  # remote_addr -> PeerSession
         self._session_listeners: list[Callable[[str, SessionState], None]] = []
         self._transfer_request_listeners = []
+        self._transfer_progress_listeners = []
+        self._transfer_complete_listeners = []
         # Active incoming transfers keyed by transfer_id
         self._incoming_transfers: Dict[str, IncomingTransfer] = {}
+        self._incoming_peers: Dict[str, PeerSession] = {}
+        # Active outgoing transfers keyed by transfer_id -> (PeerSession, OutgoingTransfer)
+        self._active_outgoing_transfers: Dict[str, tuple[PeerSession, OutgoingTransfer]] = {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -120,7 +125,25 @@ class FerryService:
         self._session_listeners.append(cb)
 
     def add_transfer_request_listener(self, cb) -> None:
+        """Register callback for incoming transfer requests: cb(remote_addr, transfer_id, file_name, file_size)."""
         self._transfer_request_listeners.append(cb)
+
+    def add_transfer_progress_listener(self, cb) -> None:
+        """Register callback for transfer progress: cb(transfer_id, bytes_done, total_bytes)."""
+        self._transfer_progress_listeners.append(cb)
+
+    def add_transfer_complete_listener(self, cb) -> None:
+        """Register callback for transfer completion: cb(transfer_id, success, file_name, direction)."""
+        self._transfer_complete_listeners.append(cb)
+
+    @property
+    def established_sessions(self) -> dict:
+        """Return {remote_addr: PeerSession} for all ESTABLISHED sessions."""
+        return {
+            addr: ps
+            for addr, ps in self._active_sessions.items()
+            if ps.state == SessionState.ESTABLISHED
+        }
 
     def _notify_session_change(self, remote_addr: str, state: SessionState) -> None:
         for cb in self._session_listeners:
@@ -128,6 +151,20 @@ class FerryService:
                 cb(remote_addr, state)
             except Exception as exc:
                 logger.error("Session listener error: %s", exc)
+
+    def _notify_transfer_progress(self, transfer_id: str, bytes_done: int, total_bytes: int) -> None:
+        for cb in self._transfer_progress_listeners:
+            try:
+                cb(transfer_id, bytes_done, total_bytes)
+            except Exception as exc:
+                logger.error("Transfer progress listener error: %s", exc)
+
+    def _notify_transfer_complete(self, transfer_id: str, success: bool, file_name: str, direction: str) -> None:
+        for cb in self._transfer_complete_listeners:
+            try:
+                cb(transfer_id, success, file_name, direction)
+            except Exception as exc:
+                logger.error("Transfer complete listener error: %s", exc)
 
     async def accept_pairing(self, remote_addr: str) -> None:
         """User clicked Accept in the pairing dialog."""
@@ -158,16 +195,19 @@ class FerryService:
             pass
         self._disconnect_session(ps)
 
-    async def send_file(self, remote_addr: str, source_path: "Path") -> bool:
+    async def send_file(
+        self,
+        remote_addr: str,
+        source_path: "Path",
+        transfer_id: Optional[str] = None,
+    ) -> bool:
         """
         Initiate an outgoing file transfer to an already-ESTABLISHED peer.
 
         Returns True if the receiver accepted and the transfer completed with
         verified integrity.  Returns False on reject, cancellation, or error.
-
-        Phase 3A MVP: single active transfer.  A second call while a transfer
-        is in progress will raise RuntimeError.
         """
+        from .db import TransferRecord
         ps = self._active_sessions.get(remote_addr)
         if ps is None:
             raise RuntimeError(f"No active session for {remote_addr}")
@@ -177,53 +217,163 @@ class FerryService:
         xfer = OutgoingTransfer(
             source_path=source_path,
             receiver_identity=ps.remote_static_pub_b64 or "",
+            transfer_id=transfer_id,
         )
         meta = xfer.build_metadata(sender_identity=self.identity.public_key_b64)
+        started_at = int(time.time() * 1000)
+        self._active_outgoing_transfers[meta.transfer_id] = (ps, xfer)
 
-        # Send TRANSFER_REQUEST
-        await self.send_encrypted(ps, MessageType.TRANSFER_REQUEST, meta.to_dict())
-        logger.info(
-            "TRANSFER_REQUEST sent to %s: %s (%d bytes)",
-            ps.remote_device_name, meta.file_name, meta.file_size,
-        )
-
-        # Wait for TRANSFER_ACCEPT or TRANSFER_REJECT (max 60s)
-        response = await asyncio.wait_for(
-            self._wait_for_transfer_response(ps, meta.transfer_id),
-            timeout=60.0,
-        )
-        if response != "ACCEPT":
-            logger.info("Transfer %s rejected or timed out", meta.transfer_id[:8])
-            return False
-
-        logger.info("Transfer %s accepted — streaming chunks", meta.transfer_id[:8])
-
-        # Stream chunks
-        async for chunk_frame_bytes in xfer.stream_chunks():
-            encrypted = ps.session.encrypt_frame(chunk_frame_bytes)
-            ps.writer.write(encrypted)
-            await ps.writer.drain()
-
-        # Send TRANSFER_COMPLETE
-        await self.send_encrypted(
-            ps, MessageType.TRANSFER_COMPLETE, {"transfer_id": meta.transfer_id}
-        )
-        logger.info("TRANSFER_COMPLETE sent for %s", meta.transfer_id[:8])
-
-        # Wait for TRANSFER_RESULT
         try:
-            result = await asyncio.wait_for(
-                self._wait_for_transfer_result(ps, meta.transfer_id),
-                timeout=60.0,
+            # Send TRANSFER_REQUEST
+            await self.send_encrypted(ps, MessageType.TRANSFER_REQUEST, meta.to_dict())
+            logger.info(
+                "TRANSFER_REQUEST sent to %s: %s (%d bytes)",
+                ps.remote_device_name, meta.file_name, meta.file_size,
             )
-            if result:
-                logger.info("Transfer %s completed successfully", meta.transfer_id[:8])
-            else:
-                logger.error("Transfer %s failed integrity check on receiver", meta.transfer_id[:8])
+
+            # Wait for TRANSFER_ACCEPT or TRANSFER_REJECT (max 60s)
+            response = "REJECT"
+            try:
+                response = await asyncio.wait_for(
+                    self._wait_for_transfer_response(ps, meta.transfer_id),
+                    timeout=60.0,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("Timed out waiting for transfer response for %s", meta.transfer_id[:8])
+
+            if response != "ACCEPT":
+                status = "CANCELLED" if response == "CANCEL" or xfer._cancelled else "REJECTED"
+                logger.info("Transfer %s not accepted (response=%s, status=%s)", meta.transfer_id[:8], response, status)
+                self._record_outgoing_transfer(meta, ps, status, started_at)
+                self._notify_transfer_complete(meta.transfer_id, False, meta.file_name, "OUTGOING")
+                return False
+
+            logger.info("Transfer %s accepted — streaming chunks", meta.transfer_id[:8])
+
+            # Stream chunks, emitting progress
+            bytes_sent = 0
+            async for chunk_frame_bytes in xfer.stream_chunks():
+                if xfer._cancelled or xfer.state == TransferState.CANCELLING:
+                    break
+                encrypted = ps.session.encrypt_frame(chunk_frame_bytes)
+                ps.writer.write(encrypted)
+                await ps.writer.drain()
+                # Approximate bytes sent (chunk frame minus 28-byte header)
+                from .transfer import CHUNK_HEADER_SIZE
+                bytes_sent += max(0, len(chunk_frame_bytes) - CHUNK_HEADER_SIZE)
+                self._notify_transfer_progress(meta.transfer_id, bytes_sent, meta.file_size)
+
+            if xfer._cancelled or xfer.state == TransferState.CANCELLING:
+                logger.info("Outgoing transfer %s cancelled by user during streaming", meta.transfer_id[:8])
+                try:
+                    await self.send_encrypted(
+                        ps, MessageType.TRANSFER_CANCEL,
+                        {"transfer_id": meta.transfer_id, "reason": "USER_CANCELLED"}
+                    )
+                except Exception as exc:
+                    logger.debug("Failed sending TRANSFER_CANCEL: %s", exc)
+                self._record_outgoing_transfer(meta, ps, "CANCELLED", started_at)
+                self._notify_transfer_complete(meta.transfer_id, False, meta.file_name, "OUTGOING")
+                return False
+
+            # Send TRANSFER_COMPLETE
+            await self.send_encrypted(
+                ps, MessageType.TRANSFER_COMPLETE, {"transfer_id": meta.transfer_id}
+            )
+            logger.info("TRANSFER_COMPLETE sent for %s", meta.transfer_id[:8])
+
+            # Wait for TRANSFER_RESULT
+            result = False
+            try:
+                result = await asyncio.wait_for(
+                    self._wait_for_transfer_result(ps, meta.transfer_id),
+                    timeout=60.0,
+                )
+                if result:
+                    logger.info("Transfer %s completed successfully", meta.transfer_id[:8])
+                else:
+                    logger.error("Transfer %s failed integrity check on receiver", meta.transfer_id[:8])
+            except asyncio.TimeoutError:
+                logger.error("Timed out waiting for TRANSFER_RESULT for %s", meta.transfer_id[:8])
+
+            self._record_outgoing_transfer(
+                meta, ps, "COMPLETED" if result else "FAILED", started_at
+            )
+            self._notify_transfer_complete(meta.transfer_id, result, meta.file_name, "OUTGOING")
             return result
-        except asyncio.TimeoutError:
-            logger.error("Timed out waiting for TRANSFER_RESULT for %s", meta.transfer_id[:8])
-            return False
+        finally:
+            self._active_outgoing_transfers.pop(meta.transfer_id, None)
+
+    def _record_outgoing_transfer(
+        self,
+        meta: TransferMetadata,
+        ps: "PeerSession",
+        status: str,
+        started_at: int,
+    ) -> None:
+        from .db import TransferRecord
+        device_id = ps.remote_device_id or ps.remote_addr
+        try:
+            self.db.add_transfer(TransferRecord(
+                transfer_id=meta.transfer_id,
+                device_id=device_id,
+                file_name=meta.file_name,
+                file_size=meta.file_size,
+                direction="OUTGOING",
+                status=status,
+                started_at=started_at,
+                completed_at=int(time.time() * 1000),
+                sha256=meta.sha256,
+            ))
+        except Exception as exc:
+            logger.warning("Failed to record outgoing transfer in history: %s", exc)
+
+    async def cancel_transfer(self, transfer_id: str, reason: str = "USER_CANCELLED") -> bool:
+        """Cancel an active outgoing or incoming transfer."""
+        # 1. Outgoing transfer
+        if transfer_id in self._active_outgoing_transfers:
+            ps, xfer = self._active_outgoing_transfers[transfer_id]
+            logger.info("Cancelling outgoing transfer %s locally", transfer_id[:8])
+            xfer.cancel()
+            self._signal_transfer_event(ps, "_transfer_events", transfer_id, "CANCEL")
+            self._signal_transfer_event(ps, "_result_events", transfer_id, False)
+            return True
+
+        # 2. Incoming transfer
+        if transfer_id in self._incoming_transfers:
+            incoming = self._incoming_transfers.pop(transfer_id, None)
+            ps = self._incoming_peers.pop(transfer_id, None)
+            if incoming:
+                logger.info("Cancelling incoming transfer %s locally", transfer_id[:8])
+                incoming.cancel()
+                if ps and ps.writer:
+                    try:
+                        await self.send_encrypted(
+                            ps, MessageType.TRANSFER_CANCEL,
+                            {"transfer_id": transfer_id, "reason": reason}
+                        )
+                    except Exception as exc:
+                        logger.debug("Failed sending TRANSFER_CANCEL: %s", exc)
+                from .db import TransferRecord
+                device_id = ps.remote_device_id or ps.remote_addr if ps else "unknown"
+                try:
+                    self.db.add_transfer(TransferRecord(
+                        transfer_id=transfer_id,
+                        device_id=device_id,
+                        file_name=incoming.meta.file_name,
+                        file_size=incoming.meta.file_size,
+                        direction="INCOMING",
+                        status="CANCELLED",
+                        started_at=int(time.time() * 1000),
+                        completed_at=int(time.time() * 1000),
+                        sha256=incoming.meta.sha256,
+                    ))
+                except Exception as exc:
+                    logger.warning("Failed to record incoming transfer in history: %s", exc)
+                self._notify_transfer_complete(transfer_id, False, incoming.meta.file_name, "INCOMING")
+                return True
+
+        return False
 
     async def _wait_for_transfer_response(self, ps: "PeerSession", transfer_id: str) -> str:
         """Block until we receive TRANSFER_ACCEPT or TRANSFER_REJECT for this transfer_id."""
@@ -661,6 +811,11 @@ class FerryService:
 
         try:
             incoming.receive_chunk(chunk)
+            self._notify_transfer_progress(
+                chunk.transfer_id,
+                incoming.bytes_received,
+                incoming.meta.file_size,
+            )
         except (ValueError, RuntimeError) as exc:
             logger.error(
                 "Error processing chunk seq=%d for transfer %s: %s",
@@ -760,6 +915,7 @@ class FerryService:
         download_dir = Path(self.config.download_dir)
         incoming = IncomingTransfer(meta=meta, download_dir=download_dir)
         self._incoming_transfers[meta.transfer_id] = incoming
+        self._incoming_peers[meta.transfer_id] = ps
 
         logger.info(f"TRANSFER_REQUEST pending approval for {meta.file_name} from {ps.remote_addr}")
         for listener in self._transfer_request_listeners:
@@ -774,6 +930,7 @@ class FerryService:
 
     async def _on_transfer_complete(self, ps: "PeerSession", transfer_id: str) -> None:
         """Receiver side: sender says all chunks sent — verify integrity."""
+        from .db import TransferRecord
         incoming = self._incoming_transfers.get(transfer_id)
         if not incoming:
             logger.warning("TRANSFER_COMPLETE for unknown transfer_id %s", transfer_id[:8])
@@ -786,16 +943,69 @@ class FerryService:
             {"transfer_id": transfer_id, "success": success, "sha256": sha256}
         )
         self._incoming_transfers.pop(transfer_id, None)
+        self._incoming_peers.pop(transfer_id, None)
+
+        # Persist to transfer history
+        device_id = ps.remote_device_id or ps.remote_addr
+        try:
+            self.db.add_transfer(TransferRecord(
+                transfer_id=transfer_id,
+                device_id=device_id,
+                file_name=incoming.meta.file_name,
+                file_size=incoming.meta.file_size,
+                direction="INCOMING",
+                status="COMPLETED" if success else "FAILED",
+                started_at=incoming.meta.created_at,
+                completed_at=int(time.time() * 1000),
+                sha256=sha256,
+            ))
+        except Exception as exc:
+            logger.warning("Failed to record incoming transfer in history: %s", exc)
+
+        self._notify_transfer_complete(
+            transfer_id, success, incoming.meta.file_name, "INCOMING"
+        )
 
     async def _on_transfer_cancel(self, ps: "PeerSession", transfer_id: str, reason: str) -> None:
         logger.info(
             "TRANSFER_CANCEL received for %s from %s (reason=%s)",
             transfer_id[:8] if transfer_id else "?", ps.remote_addr, reason
         )
-        self._cancel_incoming_transfer(transfer_id)
+        # Cancel incoming if active
+        incoming = self._incoming_transfers.pop(transfer_id, None)
+        self._incoming_peers.pop(transfer_id, None)
+        if incoming:
+            incoming.cancel()
+            from .db import TransferRecord
+            device_id = ps.remote_device_id or ps.remote_addr
+            try:
+                self.db.add_transfer(TransferRecord(
+                    transfer_id=transfer_id,
+                    device_id=device_id,
+                    file_name=incoming.meta.file_name,
+                    file_size=incoming.meta.file_size,
+                    direction="INCOMING",
+                    status="CANCELLED",
+                    started_at=incoming.meta.created_at,
+                    completed_at=int(time.time() * 1000),
+                    sha256=incoming.meta.sha256,
+                ))
+            except Exception as exc:
+                logger.warning("Failed to record cancelled incoming transfer in history: %s", exc)
+            self._notify_transfer_complete(transfer_id, False, incoming.meta.file_name, "INCOMING")
+
+        # Cancel outgoing if active
+        if transfer_id in self._active_outgoing_transfers:
+            _, xfer = self._active_outgoing_transfers[transfer_id]
+            xfer.cancel()
+
+        # Unblock any waiting events on peer session
+        self._signal_transfer_event(ps, "_transfer_events", transfer_id, "CANCEL")
+        self._signal_transfer_event(ps, "_result_events", transfer_id, False)
 
     def _cancel_incoming_transfer(self, transfer_id: str) -> None:
         incoming = self._incoming_transfers.pop(transfer_id, None)
+        self._incoming_peers.pop(transfer_id, None)
         if incoming:
             incoming.cancel()
 

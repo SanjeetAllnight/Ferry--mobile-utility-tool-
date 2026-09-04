@@ -42,6 +42,8 @@ class FerryApplication(Adw.Application):
         self.service.discovery.add_listener(self._on_devices_changed)
         self.service.add_session_listener(self._on_session_changed)
         self.service.add_transfer_request_listener(self._on_transfer_request)
+        self.service.add_transfer_progress_listener(self._on_transfer_progress)
+        self.service.add_transfer_complete_listener(self._on_transfer_complete)
 
         def run_asyncio():
             self._loop = asyncio.new_event_loop()
@@ -63,6 +65,14 @@ class FerryApplication(Adw.Application):
     def _on_transfer_request(self, remote_addr: str, transfer_id: str, file_name: str, file_size: int) -> None:
         if self.service and self.window:
             GLib.idle_add(self.window.handle_transfer_request, remote_addr, transfer_id, file_name, file_size)
+
+    def _on_transfer_progress(self, transfer_id: str, bytes_done: int, total_bytes: int) -> None:
+        if self.service and self.window:
+            GLib.idle_add(self.window.update_transfer_progress, transfer_id, bytes_done, total_bytes)
+
+    def _on_transfer_complete(self, transfer_id: str, success: bool, file_name: str, direction: str) -> None:
+        if self.service and self.window:
+            GLib.idle_add(self.window.handle_transfer_complete, transfer_id, success, file_name, direction)
 
     def get_service(self):
         return self.service

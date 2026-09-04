@@ -5,13 +5,14 @@ This document is the primary persistent context file for **Ferry**. It reflects 
 ---
 
 ### Current Phase: Phase 3 (File Transfer Execution)
-**Status:** In Progress
+**Status:** In Progress — Phase 3C Fully Closed (Phase 3C.2 Acceptance Gates Passed)
 **Goal:** Implement file transfer capabilities between paired devices.
 
 ### Phase 3 Progress Tracking:
 - **Phase 3A (Transfer Architecture & Base Data Channel)**: Complete / Verified. TransferState and metadata tracking implemented on both OS platforms. In-band multiplexing via binary `FYCH` chunk frames established over existing ChaCha20-Poly1305 sessions (ADR 007). All unit tests passing (127 Linux, 50 Android). Physical Android ↔ Linux streaming and SHA-256 integrity verified over local Wi-Fi.
 - **Phase 3B (Linux File Receiving & Transfer Approvals)**: Complete / Verified. `IncomingTransfer` refactored to parse directly to user's specified `download_dir`. Receiver `FerryService` extended to surface `TRANSFER_REQUEST` up to the UI. Fully integration tested on Linux and physically verified receiving a file from Android over Wi-Fi.
-- **Phase 3C (Sender & Receiver UI / File Picking)**: Pending (Next)
+- **Phase 3C / 3C.1 (Sender & Receiver UI / File Picking & Physical QA)**: Complete / Fully Verified. Full bidirectional user-facing file transfer experience physically verified on real Android device and Arch Linux desktop. Linux `Gtk.FileDialog` and Android SAF `GetContent` picker validated. Bidirectional streaming (up to 16.5 MB at ~11.8 MB/s), SHA-256 integrity verification, live UI progress, incoming transfer approval, and transfer history panels verified.
+- **Phase 3C.2 (Final Acceptance-Gate Verification & Discrepancy Resolution)**: Complete / Fully Verified. Resolved both remaining acceptance gate discrepancies: (1) native zero-byte (0-byte) file transfer support with SHA-256 `e3b0c442...` integrity verification, and (2) user-facing in-flight transfer cancellation UI buttons on GTK4 and Jetpack Compose with wire `TRANSFER_CANCEL` transmission, immediate `.part` cleanup, and `CANCELLED` history recording. 149/149 Linux unit tests and 52/52 Android unit tests passing (201 total). Phase 3C is officially CLOSED.
 
 ### Previous Phase: Phase 2C (Interactive Trust & Identity Storage)
 **Status:** Complete / Verified
@@ -33,40 +34,22 @@ This document is the primary persistent context file for **Ferry**. It reflects 
 ## 3. Implemented & Verified Functionality
 
 * [x] **Project Repository & Configuration**: Standardized structure, `.gitignore`, `README.md`, and agent operating manual (`AGENTS.md`).
-* [x] **Comprehensive Documentation Suite**: `ARCHITECTURE.md`, `PROTOCOL.md`, `SECURITY.md`, `DEVELOPMENT.md`, `TESTING.md`, `DECISIONS.md`, `PROJECT_STATE.md`, `PHASE_2B_AUDIT.md`, and `PHASE_2B.1_SECURITY_REVIEW.md`.
-* [x] **Linux Discovery Subsystem (`linux/src/ferry_linux/core/discovery.py`)**:
-  * `AsyncZeroconf` service advertisement with dynamic local IP enumeration and standard Ferry TXT attributes.
-  * `AsyncServiceBrowser` and `AsyncServiceInfo` peer resolution.
-  * In-memory deduplication by stable `device_id` and self-advertisement filtering.
-  * Event listener callbacks for device appearance and removal.
-  * Live dynamic "Nearby Devices" display in GTK4 / Libadwaita window (`linux/src/ferry_linux/ui/window.py`).
-  * Automated unit tests (`test_discovery_models.py`, `test_discovery_manager.py`) and live mDNS loopback test (`test_discovery_integration.py`).
-* [x] **Android Discovery Subsystem (`android/app/src/main/kotlin/dev/ferry/app/discovery/`)**:
-  * `NsdManager` service registration and discovery engine (`FerryDiscoveryEngine.kt`).
-  * MulticastLock management for background/foreground packet reception.
-  * Thread-safe `StateFlow<List<DiscoveredDevice>>` emitting resolved peers.
-  * Dynamic Compose UI in `FerryApp.kt` rendering discovered Arch Linux hosts.
-  * Automated unit tests (`DiscoveredDeviceTest.kt`).
-* [x] **Physical End-to-End Discovery Verification (Phase 2A)**:
-  * Bidirectional discovery verified: Linux discovered Android, Android discovered Linux.
-  * Verified service stop/removal handling and duplicate filtering.
-* [x] **Linux Secure Control Plane (Phase 2B)**:
-  * `IdentityManager` for Ed25519 keys and signing (`identity.key` with mode `0600`).
-  * `FerrySession` state machine, X25519 DH, HKDF SAS, and ChaCha20-Poly1305 AEAD framing.
-  * Async TCP server and client connecting to discovered peers.
-  * 53 passing automated unit/integration tests in `linux/tests/`.
-* [x] **Android Secure Control Plane (Phase 2B)**:
-  * Handshake, HKDF SAS derivation, and ChaCha20-Poly1305 framing working.
-  * Verified unit tests (`SessionTest.kt`, `CryptoTest.kt`, `ControlClientTest.kt`).
-* [x] **Interactive Trust & Android KeyStore (Phase 2C / 2C.3)**:
-  * **Android**: Ed25519 identity implemented using `AndroidKeyStore` (`KeyGenParameterSpec`) with hardware backing.
-  * **Android**: Interactive UI for incoming connections displaying the 6-digit SAS code, allowing Accept/Reject.
-  * **Linux**: `TrustedDevices` SQLite table accurately tracking previously authenticated peers.
-  * **Linux**: `Adw.MessageDialog` prompting user to confirm pairing codes before advancing to `ESTABLISHED` (fixed in Phase 2C.3: proper `transient_for=self` and `dialog.present()` without parameter).
-  * **Both**: Interactive handshake verified to halt at `PAIRING` state. Upon explicit acceptance by both parties, connection progresses to `ESTABLISHED`. State transitions verified via full unit test coverage (127 tests in Linux test suite, 50 Android tests).
-* [x] **Physical End-to-End Control Plane Verification (Phase 2B/2C/2C.3)**:
-  * Android (`Realme RMX3870`, Android 16/SDK 36) connected to Arch Linux daemon (`archnoir`) over local Wi-Fi.
-  * Mutual AKE completed, SAS computed, Ed25519 signatures verified, and AEAD session reached `ESTABLISHED` with `● Secure` badge in UI.
+* [x] **Comprehensive Documentation Suite**: `ARCHITECTURE.md`, `PROTOCOL.md`, `SECURITY.md`, `DEVELOPMENT.md`, `TESTING.md`, `DECISIONS.md`, `PROJECT_STATE.md`, `PHASE_3C_REPORT.md`, `PHASE_3C.1_PHYSICAL_VERIFICATION.md`, `PHASE_3C.2_FINAL_ACCEPTANCE.md`.
+* [x] **Linux Discovery Subsystem (`linux/src/ferry_linux/core/discovery.py`)**
+* [x] **Android Discovery Subsystem (`android/app/src/main/kotlin/dev/ferry/app/discovery/`)**
+* [x] **Physical End-to-End Discovery Verification (Phase 2A)**
+* [x] **Linux Secure Control Plane (Phase 2B)**
+* [x] **Android Secure Control Plane (Phase 2B)**
+* [x] **Interactive Trust & Android KeyStore (Phase 2C / 2C.3)**
+* [x] **Secure Transfer Transport & In-Band Multiplexing (Phase 3A / 3A.1)**
+* [x] **Linux File Receiver & Transfer Approvals (Phase 3B / 3B.1)**
+* [x] **Complete User-Facing File Transfer (Phase 3C / 3C.1)**:
+  - Linux `Gtk.FileDialog` integration, header Send button, per-device send button, live progress bars, transfer history panel.
+  - Android SAF `GetContent` file picker FAB, memory-efficient `InputStream` streaming, Compose live progress and history cards.
+  - Bidirectional physical transfers verified end-to-end with SHA-256 integrity, rejection, in-flight cancellation, and trusted reconnects.
+* [x] **Final Acceptance Gate Verification (Phase 3C.2)**:
+  - 0-byte file transfers supported and physically validated end-to-end on real hardware.
+  - User-facing UI Cancel buttons added to Linux GTK4 and Android Compose progress cards; wire `TRANSFER_CANCEL` and clean `.part` purge verified mid-flight.
 
 ---
 
@@ -86,7 +69,7 @@ This document is the primary persistent context file for **Ferry**. It reflects 
 
 ### Linux
 ```bash
-# Run all unit and integration tests (147 tests)
+# Run all unit and integration tests (149 tests)
 PYTHONPATH=linux/src python3 -m unittest discover -s linux/tests -v
 
 # Run desktop UI with discovery active
@@ -98,7 +81,7 @@ PYTHONPATH=linux/src python3 -m ferry_linux --service
 
 ### Android
 ```bash
-# Run unit tests
+# Run unit tests (52 tests)
 cd android && ./gradlew testDebugUnitTest
 
 # Build debug APK
@@ -115,15 +98,11 @@ adb shell am start -n dev.ferry.app/.MainActivity
 
 ## 6. Known Limitations & Phase Boundary
 
-* **No File Selection UI (Phase 3B)**: File selection UX via file pickers (Android Intent/SAF and GTK FileChooser) is not yet implemented.
-* **No Resumption (Phase 3C)**: File transfer resumption and explicit cancellation (other than connection drop) are pending.
+* **No Resumption (Phase 3D)**: File transfer resumption for interrupted transfers is planned for Phase 3D.
+* **Single Transfer at a Time**: Current architecture handles one active transfer at a time per peer session.
 
 ---
 
 ## 7. Next Recommended Task
 
-* **Begin Phase 3C (Sender & Receiver UI / File Picking)**:
-  - Implement Android SAF `ACTION_OPEN_DOCUMENT` and `ACTION_SEND` intent handlers to select files to send.
-  - Implement GTK4 `Gtk.FileDialog` for selecting files on Linux.
-  - Wire UI actions to `FerryService.send_file()` and Android's `FerryTransferClient.streamChunks()`.
-  - Add file transfer progress indicators and transfer completion alerts in both UIs.
+* **Phase 3D (Transfer Optimization, Error Recovery & Resumption)** or transition to next planned milestone.

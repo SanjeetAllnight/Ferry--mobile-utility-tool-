@@ -141,12 +141,13 @@ class TestTransferMetadataValidation(unittest.TestCase):
         meta = TransferMetadata.from_dict(d)
         self.assertEqual(meta.file_name, "passwd")
 
-    def test_zero_file_size_rejected(self):
+    def test_zero_file_size_accepted(self):
         d = _make_meta_dict()
         d["file_size"] = 0
         d["chunk_count"] = 0
-        with self.assertRaises(ValueError):
-            TransferMetadata.from_dict(d)
+        meta = TransferMetadata.from_dict(d)
+        self.assertEqual(meta.file_size, 0)
+        self.assertEqual(meta.chunk_count, 0)
 
     def test_negative_file_size_rejected(self):
         d = _make_meta_dict()
@@ -504,6 +505,43 @@ class TestTransferLifecycle(unittest.TestCase):
             chunk = decode_chunk_frame(raw_frame)
             receiver.receive_chunk(chunk)
             break  # only send one chunk
+
+    def test_zero_byte_transfer_success(self):
+        """Zero-byte file transfer: 0 chunks, SHA-256 verified, empty destination file."""
+        src = self.tmpdir / "empty.txt"
+        src.write_bytes(b"")
+
+        sender = OutgoingTransfer(source_path=src, receiver_identity="")
+        meta = sender.build_metadata(sender_identity="sender_pk")
+        self.assertEqual(meta.file_size, 0)
+        self.assertEqual(meta.chunk_count, 0)
+        self.assertEqual(meta.sha256, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+
+        dest_dir = self.tmpdir / "downloads"
+        receiver = IncomingTransfer(meta=meta, download_dir=dest_dir)
+        receiver.begin()
+
+        # Sender yields 0 chunks
+        loop = asyncio.new_event_loop()
+        try:
+            chunks = loop.run_until_complete(self._collect_all_chunks(sender))
+        finally:
+            loop.close()
+        self.assertEqual(len(chunks), 0)
+
+        success = receiver.finalise()
+        self.assertTrue(success)
+        self.assertEqual(receiver.state, TransferState.COMPLETED)
+
+        final_file = dest_dir / "empty.txt"
+        self.assertTrue(final_file.exists())
+        self.assertEqual(final_file.stat().st_size, 0)
+
+    async def _collect_all_chunks(self, sender: OutgoingTransfer) -> list:
+        chunks = []
+        async for chunk in sender.stream_chunks():
+            chunks.append(chunk)
+        return chunks
 
 
 # ── 12. Large file streaming without whole-file loading ───────────────────────

@@ -85,7 +85,7 @@ data class TransferMetadata(
                 is Number -> v.toLong()
                 else -> 0L
             }
-            require(fileSize > 0) { "file_size must be positive, got $fileSize" }
+            require(fileSize >= 0) { "file_size must be non-negative, got $fileSize" }
             require(fileSize <= MAX_FILE_SIZE) { "file_size $fileSize exceeds 10 GiB limit" }
 
             val chunkSize = when (val v = data["chunk_size"]) {
@@ -102,7 +102,7 @@ data class TransferMetadata(
                 is Number -> v.toInt()
                 else -> -1
             }
-            val expectedChunks = ((fileSize + chunkSize - 1) / chunkSize).toInt()
+            val expectedChunks = if (fileSize > 0) ((fileSize + chunkSize - 1) / chunkSize).toInt() else 0
             require(chunkCount == expectedChunks) {
                 "chunk_count $chunkCount does not match file_size/chunk_size (expected $expectedChunks)"
             }

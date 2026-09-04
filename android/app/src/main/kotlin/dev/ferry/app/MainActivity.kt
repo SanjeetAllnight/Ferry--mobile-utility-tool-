@@ -53,9 +53,11 @@ class MainActivity : ComponentActivity() {
         discoveryEngine.start()
     }
 
-    override fun onStop() {
-        super.onStop()
-        discoveryEngine.stop()
-        controlClient.disconnect()
+    override fun onDestroy() {
+        super.onDestroy()
+        if (isFinishing) {
+            discoveryEngine.stop()
+            controlClient.disconnect()
+        }
     }
 }

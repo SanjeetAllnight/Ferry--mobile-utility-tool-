@@ -138,8 +138,8 @@ class TransferMetadata:
             raise ValueError(f"Empty or invalid file_name after sanitisation: {raw_name!r}")
 
         file_size = int(data["file_size"])
-        if file_size <= 0:
-            raise ValueError(f"file_size must be positive, got {file_size}")
+        if file_size < 0:
+            raise ValueError(f"file_size must be non-negative, got {file_size}")
         if file_size > 10 * 1024 ** 3:  # 10 GiB soft limit
             raise ValueError(f"file_size {file_size} exceeds 10 GiB limit")
 
@@ -148,7 +148,7 @@ class TransferMetadata:
             raise ValueError(f"chunk_size {chunk_size} out of range (1..{MAX_CHUNK_PAYLOAD})")
 
         chunk_count = int(data.get("chunk_count", -1))
-        expected_chunks = (file_size + chunk_size - 1) // chunk_size
+        expected_chunks = (file_size + chunk_size - 1) // chunk_size if file_size > 0 else 0
         if chunk_count != expected_chunks:
             raise ValueError(
                 f"chunk_count {chunk_count} does not match file_size/chunk_size "
@@ -462,8 +462,13 @@ class OutgoingTransfer:
     yields — streaming, not buffering.
     """
 
-    def __init__(self, source_path: Path, receiver_identity: str) -> None:
-        self.transfer_id = str(uuid.uuid4())
+    def __init__(
+        self,
+        source_path: Path,
+        receiver_identity: str,
+        transfer_id: Optional[str] = None,
+    ) -> None:
+        self.transfer_id = transfer_id or str(uuid.uuid4())
         self._source_path = source_path
         self._receiver_identity = receiver_identity
         self._state = TransferState.IDLE
@@ -488,10 +493,10 @@ class OutgoingTransfer:
         """
         stat = self._source_path.stat()
         file_size = stat.st_size
-        if file_size <= 0:
-            raise ValueError(f"Cannot transfer empty file: {self._source_path}")
+        if file_size < 0:
+            raise ValueError(f"Invalid negative file size: {self._source_path}")
 
-        chunk_count = (file_size + CHUNK_SIZE - 1) // CHUNK_SIZE
+        chunk_count = (file_size + CHUNK_SIZE - 1) // CHUNK_SIZE if file_size > 0 else 0
         sha256 = _sha256_file(self._source_path)
         mime_type = _guess_mime_type(self._source_path)
 

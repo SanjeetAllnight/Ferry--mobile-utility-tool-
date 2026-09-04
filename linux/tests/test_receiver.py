@@ -281,5 +281,23 @@ class TestReceiverLogic(unittest.IsolatedAsyncioTestCase):
         await self.service._on_transfer_cancel(self.ps, transfer_id, "CANCEL")
         self.assertFalse(temp_path.exists())
 
+    async def test_21_cancel_transfer_locally_sends_cancel_and_cleans_up(self):
+        await self.service._on_transfer_request(self.ps, self.valid_meta_dict)
+        transfer_id = self.valid_meta_dict["transfer_id"]
+        await self.service.accept_transfer("192.168.1.100:5000", transfer_id)
+
+        incoming = self.service._incoming_transfers.get(transfer_id)
+        temp_path = incoming._temp_path
+        self.assertTrue(temp_path.exists())
+
+        cancelled = await self.service.cancel_transfer(transfer_id)
+        self.assertTrue(cancelled)
+        self.assertNotIn(transfer_id, self.service._incoming_transfers)
+        self.assertFalse(temp_path.exists())
+        self.service.send_encrypted.assert_called_with(
+            self.ps, MessageType.TRANSFER_CANCEL,
+            {"transfer_id": transfer_id, "reason": "USER_CANCELLED"}
+        )
+
 if __name__ == '__main__':
     unittest.main()

@@ -1,6 +1,9 @@
 package dev.ferry.app.transfer
 
 import android.util.Log
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.io.InputStream
 import java.io.OutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -17,8 +20,8 @@ import java.util.UUID
  * The caller (FerryControlClient) is responsible for:
  *   1. Sending TRANSFER_REQUEST (metadata) over the encrypted control channel
  *   2. Waiting for TRANSFER_ACCEPT
- *   3. Calling streamChunks() with the OutputStream and file content
- *   4. Sending TRANSFER_COMPLETE after streamChunks() returns
+ *   3. Calling streamChunks() / streamChunksFromStream() with the OutputStream and file content
+ *   4. Sending TRANSFER_COMPLETE after streaming returns
  *   5. Waiting for TRANSFER_RESULT
  *
  * This class handles ONLY the data-plane chunk encoding and streaming.
@@ -78,14 +81,15 @@ class FerryTransferClient {
     }
 
     /**
-     * Stream file content in chunks.
+     * Stream file content from an in-memory byte array.
+     * Kept for unit-test compatibility. Production code uses [streamChunksFromStream].
      *
      * @param transferId   Transfer UUID (from TransferMetadata)
-     * @param fileBytes    Raw file content (for MVP; Phase 3B will use InputStream)
+     * @param fileBytes    Raw file content
      * @param encryptAndWrite   Callback that encrypts a raw chunk frame and writes it to the socket.
-     *                         Runs on the caller's IO coroutine.
      * @param onProgress   Optional progress callback (bytesWritten, totalBytes)
-     * @return             True if streaming completed without cancellation, False if cancelled.
+     * @param cancelSignal Returns true if the transfer has been cancelled.
+     * @return             True if streaming completed, false if cancelled.
      */
     suspend fun streamChunks(
         transferId: String,
@@ -118,5 +122,63 @@ class FerryTransferClient {
 
         Log.i(TAG, "Transfer $transferId: all $seq chunks sent")
         return true
+    }
+
+    /**
+     * Stream file content from an [InputStream] without loading the full file into memory.
+     *
+     * Reads up to [CHUNK_SIZE] bytes per iteration, encodes each as a FYCH chunk frame,
+     * encrypts it via [encryptAndWrite], and reports progress via [onProgress].
+     * SHA-256 is computed incrementally.
+     *
+     * @param transferId      Transfer UUID
+     * @param inputStream     Open InputStream positioned at the start of the file.
+     *                        The caller is responsible for closing it.
+     * @param totalBytes      Expected total file size in bytes (for progress reporting).
+     * @param encryptAndWrite Suspending callback: receives a raw (unencrypted) chunk frame
+     *                        and must encrypt-then-write it to the socket.
+     * @param onProgress      Optional callback (bytesDone, totalBytes)
+     * @param cancelSignal    Returns true if the transfer should be aborted.
+     * @return                Pair of (success: Boolean, sha256Hex: String).
+     *                        success is false if cancelled before all bytes were sent.
+     */
+    suspend fun streamChunksFromStream(
+        transferId: String,
+        inputStream: InputStream,
+        totalBytes: Long,
+        encryptAndWrite: suspend (ByteArray) -> Unit,
+        onProgress: ((Long, Long) -> Unit)? = null,
+        cancelSignal: () -> Boolean = { false },
+    ): Pair<Boolean, String> = withContext(Dispatchers.IO) {
+        val digest = MessageDigest.getInstance("SHA-256")
+        val buffer = ByteArray(CHUNK_SIZE)
+        var seq = 0
+        var bytesSent = 0L
+
+        Log.i(TAG, "Streaming transfer $transferId from InputStream: $totalBytes bytes expected")
+
+        while (true) {
+            if (cancelSignal()) {
+                Log.i(TAG, "Transfer $transferId cancelled at seq=$seq")
+                return@withContext Pair(false, "")
+            }
+
+            val bytesRead = inputStream.read(buffer, 0, CHUNK_SIZE)
+            if (bytesRead == -1) break  // EOF
+
+            val chunk = if (bytesRead == CHUNK_SIZE) buffer else buffer.copyOf(bytesRead)
+            digest.update(chunk, 0, bytesRead)
+
+            val frame = encodeChunkFrame(transferId, seq, chunk)
+            encryptAndWrite(frame)
+
+            bytesSent += bytesRead
+            seq++
+            onProgress?.invoke(bytesSent, totalBytes)
+        }
+
+        val sha256 = digest.digest().joinToString("") { "%02x".format(it) }
+        Log.i(TAG, "Transfer $transferId: $seq chunks sent, sha256=$sha256")
+        Pair(true, sha256)
     }
 }

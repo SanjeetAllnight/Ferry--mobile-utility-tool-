@@ -60,7 +60,7 @@ class TransferTest {
         sha256: String = "a".repeat(64),
         fileName: String = "photo.jpg",
     ): MutableMap<String, Any?> {
-        val chunkCount = ((fileSize + chunkSize - 1) / chunkSize).toInt()
+        val chunkCount = if (fileSize > 0) ((fileSize + chunkSize - 1) / chunkSize).toInt() else 0
         return mutableMapOf(
             "transfer_id" to UUID.randomUUID().toString(),
             "file_name" to fileName,
@@ -104,10 +104,17 @@ class TransferTest {
         assertEquals("passwd", meta.fileName)
     }
 
-    @Test(expected = IllegalArgumentException::class) fun test05_zeroFileSizeRejected() {
+    @Test fun test05_zeroFileSizeAccepted() {
         val chunkSize = TransferMetadata.MAX_CHUNK_SIZE
         val m = validMap(fileSize = 0L, chunkSize = chunkSize)
         m["chunk_count"] = 0
+        val meta = TransferMetadata.fromMap(m)
+        assertEquals(0L, meta.fileSize)
+        assertEquals(0, meta.chunkCount)
+    }
+
+    @Test(expected = IllegalArgumentException::class) fun test05b_negativeFileSizeRejected() {
+        val m = validMap(fileSize = -1L)
         TransferMetadata.fromMap(m)
     }
 
@@ -263,6 +270,36 @@ class TransferTest {
         // Temp file should be gone
         val tempFile = File(stagingDir, "$tid.part")
         assertFalse("Temp file should be renamed, not exist at .part path", tempFile.exists())
+    }
+
+    @Test fun test22b_zeroByteTransferLifecycleSuccess() {
+        val fileData = ByteArray(0)
+        val fileSize = 0L
+        val sha256 = sha256Hex(fileData)
+        val chunkSize = FerryTransferClient.CHUNK_SIZE
+        val chunkCount = 0
+        val tid = UUID.randomUUID().toString()
+
+        val meta = TransferMetadata(
+            transferId = tid,
+            fileName = "empty.txt",
+            fileSize = fileSize,
+            mimeType = "text/plain",
+            sha256 = sha256,
+            chunkSize = chunkSize,
+            chunkCount = chunkCount,
+            senderIdentity = "",
+            createdAt = 0L,
+        )
+
+        val receiver = FerryTransferReceiver(meta, stagingDir)
+        receiver.begin()
+        val success = receiver.finalise()
+        assertTrue("0-byte transfer should complete successfully", success)
+
+        val finalFile = File(stagingDir, "empty.txt")
+        assertTrue("Final empty file should exist", finalFile.exists())
+        assertEquals(0L, finalFile.length())
     }
 
     @Test fun test23_integrityFailure() {

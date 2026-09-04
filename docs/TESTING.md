@@ -38,7 +38,7 @@ This document outlines the testing strategy, test layers, and verification comma
   * `test_receiver.py`: Verifies Phase 3B Linux receiver event bus, interactive approval/rejection lifecycle, download directory resolution, and error handling.
 
 ```bash
-# Run all Linux tests (147 tests)
+# Run all Linux tests (149 tests)
 PYTHONPATH=linux/src python3 -m unittest discover -s linux/tests -v
 ```
 
@@ -47,19 +47,23 @@ PYTHONPATH=linux/src python3 -m unittest discover -s linux/tests -v
 * **Test Modules**:
   * `ProtocolConstantsTest.kt`: Verifies protocol version constants, message types, and schema contracts matching Linux models.
   * `DiscoveredDeviceTest.kt`: Verifies TXT attribute parsing, host validation, protocol version checks, and null safety.
+  * `SessionTest.kt`: Verifies session framing, AEAD encryption/decryption, and state transitions.
+  * `TransferTest.kt`: Verifies transfer state machine, chunk calculation, 0-byte file support, and SHA-256 digest validation.
 
 ```bash
-# Run Android local unit tests
+# Run Android local unit tests (52 tests)
 cd android && ./gradlew testDebugUnitTest
 ```
 
-### 2.3. Physical End-to-End Discovery Verification (Phase 2A Verified)
-1. Both Arch Linux host (`10.213.207.51`) and Android physical device (`10.213.207.31`) connected to the same Wi-Fi subnet.
-2. Android app registers `Ferry-<id>` via `NsdManager` with TXT records.
-3. Linux daemon discovers `RMX3870 (Ferry)` at `10.213.207.31:53770`.
-4. Linux daemon registers `Ferry-<id>` via `AsyncZeroconf` with local network IPs.
-5. Android app resolves `archnoir (Ferry)` at `10.213.207.51:53770` and renders "Nearby Devices (Untrusted)".
-6. Verified lifecycle: stopping Linux service updates Android UI to "Searching Local Network...", restarting Linux service re-discovers in ~50ms, restarting Android app maintains clean single-entry state without duplicates.
+### 2.3. Physical End-to-End Verification History
+* **Phase 2A (Discovery)**: Bidirectional discovery over LAN mDNS verified.
+* **Phase 2B/2C (Interactive Trust & AKE)**: Handshake, SAS pairing dialogs, and SQLite/AndroidKeyStore identity verified.
+* **Phase 3A/3B (Transfer Transport & Linux Receiver)**: Binary `FYCH` chunk streaming over AEAD TCP verified with SHA-256 integrity and approval dialogs.
+* **Phase 3C / 3C.1 (User-Facing File Transfer)**:
+  - Linux `Gtk.FileDialog` and Android SAF document picker verified.
+  - Bidirectional transfers (up to 16.5 MB at ~11.8 MB/s) with live UI progress indicators verified.
+  - Incoming transfer approval, cancellation mid-flight, and transfer history verified on physical Realme device and Arch Linux desktop.
+  - See `docs/PHASE_3C.1_PHYSICAL_VERIFICATION.md` for full physical test log and hash comparisons.
 
 ---
 
