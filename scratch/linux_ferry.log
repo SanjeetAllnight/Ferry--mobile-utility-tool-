@@ -1,0 +1,49 @@
+
+(__main__.py:21890): Adwaita-WARNING **: 23:36:26.280: Using GtkSettings:gtk-application-prefer-dark-theme with libadwaita is unsupported. Please use AdwStyleManager:color-scheme instead.
+2026-09-04 23:36:26,329 [INFO] ferry.identity: Ferry identity loaded. Public key: 9f14ZoHaJtdT...
+2026-09-04 23:36:26,330 [INFO] ferry.service: Starting Ferry Service on port 53770...
+2026-09-04 23:36:26,330 [INFO] ferry.discovery: Initializing AsyncZeroconf for Ferry discovery...
+2026-09-04 23:36:27,542 [INFO] ferry.discovery: Ferry mDNS service registered as: Ferry-bf347bfd._ferry._tcp.local. with IP(s): ['10.213.207.51']
+2026-09-04 23:36:27,542 [INFO] ferry.discovery: Ferry mDNS service browser active for _ferry._tcp.local.
+2026-09-04 23:36:27,543 [INFO] ferry.discovery: Discovered/Updated Ferry peer: RMX3870 (Ferry) (mobile, android) at 10.213.207.31:53770
+2026-09-04 23:36:27,544 [INFO] ferry.service: Ferry Service is active. Device ID: bf347bfd-8a8e-4e95-9e3d-d03d37a07b31, Name: archnoir (Ferry), Identity: 9f14ZoHaJtdT...
+2026-09-04 23:37:43,535 [INFO] ferry.service: Incoming connection from 10.213.207.31:47956
+2026-09-04 23:37:43,559 [INFO] ferry.service: Auth verified for archnoir (Ferry)
+2026-09-04 23:37:43,572 [INFO] ferry.service: Session ESTABLISHED with archnoir (Ferry) (10.213.207.31:47956)
+2026-09-04 23:37:55,672 [ERROR] ferry.service: Session loop error with 10.213.207.31:47956: [Errno 104] Connection reset by peer
+2026-09-04 23:38:05,861 [INFO] ferry.service: Incoming connection from 10.213.207.31:44938
+2026-09-04 23:38:05,874 [INFO] ferry.service: Auth verified for archnoir (Ferry)
+2026-09-04 23:38:05,897 [INFO] ferry.service: Session ESTABLISHED with archnoir (Ferry) (10.213.207.31:44938)
+2026-09-04 23:38:12,208 [ERROR] ferry.service: Session loop error with 10.213.207.31:44938: [Errno 104] Connection reset by peer
+2026-09-04 23:40:13,932 [INFO] ferry.discovery: Discovered/Updated Ferry peer: RMX3870 (Ferry) (mobile, android) at 10.213.207.31:53770
+2026-09-04 23:40:16,873 [INFO] ferry.service: Incoming connection from 10.213.207.31:46716
+2026-09-04 23:40:16,913 [INFO] ferry.service: Auth verified for archnoir (Ferry)
+2026-09-04 23:40:16,913 [INFO] ferry.service: New peer archnoir (Ferry) — Requesting pairing, SAS: 897783
+2026-09-04 23:40:20,174 [INFO] ferry.service: Local user accepted pairing with archnoir (Ferry)
+2026-09-04 23:40:20,203 [INFO] ferry.service: Received PAIR_DECISION: ACCEPT from archnoir (Ferry)
+2026-09-04 23:40:20,216 [INFO] ferry.service: Trust persisted for peer archnoir (Ferry)
+2026-09-04 23:40:23,749 [ERROR] ferry.service: Session loop error with 10.213.207.31:46716: [Errno 104] Connection reset by peer
+2026-09-04 23:40:29,955 [INFO] ferry.service: Incoming connection from 10.213.207.31:58692
+2026-09-04 23:40:29,969 [INFO] ferry.service: Auth verified for archnoir (Ferry)
+2026-09-04 23:40:29,983 [INFO] ferry.service: Session ESTABLISHED with archnoir (Ferry) (10.213.207.31:58692)
+2026-09-04 23:40:33,653 [INFO] ferry.service: TRANSFER_REQUEST pending approval for test_55mb_ferry.bin from 10.213.207.31:58692
+2026-09-04 23:40:33,653 [INFO] ferry.service: TRANSFER_REQUEST notified UI for test_55mb_ferry.bin from 10.213.207.31:58692
+2026-09-04 23:40:45,121 [INFO] ferry.transfer: Incoming transfer 32eef3f5 started: test_55mb_ferry.bin (57671680 bytes, 880 chunks)
+2026-09-04 23:40:46,573 [ERROR] ferry.service: Session loop error with 10.213.207.31:58692: [Errno 104] Connection reset by peer
+2026-09-04 23:40:46,573 [INFO] ferry.service: Incoming transfer 32eef3f5 FAILED due to peer disconnect
+2026-09-04 23:55:32,773 [INFO] ferry.discovery: Discovered/Updated Ferry peer: RMX3870 (Ferry) (mobile, android) at 10.213.207.31:53770
+2026-09-04 23:55:37,799 [INFO] ferry.service: Incoming connection from 10.213.207.31:45570
+2026-09-04 23:55:37,823 [INFO] ferry.service: Auth verified for archnoir (Ferry)
+2026-09-04 23:55:37,824 [INFO] ferry.service: New peer archnoir (Ferry) — Requesting pairing, SAS: 114427
+2026-09-04 23:55:41,550 [INFO] ferry.service: Local user accepted pairing with archnoir (Ferry)
+2026-09-04 23:55:41,566 [INFO] ferry.service: Received PAIR_DECISION: ACCEPT from archnoir (Ferry)
+2026-09-04 23:55:41,587 [INFO] ferry.service: Trust persisted for peer archnoir (Ferry)
+2026-09-04 23:55:45,337 [ERROR] ferry.service: Session loop error with 10.213.207.31:45570: [Errno 104] Connection reset by peer
+2026-09-04 23:55:52,652 [INFO] ferry.service: Incoming connection from 10.213.207.31:45112
+2026-09-04 23:55:52,687 [INFO] ferry.service: Auth verified for archnoir (Ferry)
+2026-09-04 23:55:52,700 [INFO] ferry.service: Session ESTABLISHED with archnoir (Ferry) (10.213.207.31:45112)
+2026-09-04 23:55:56,710 [INFO] ferry.service: TRANSFER_REQUEST pending approval for test_55mb_ferry.bin from 10.213.207.31:45112
+2026-09-04 23:55:56,710 [INFO] ferry.service: TRANSFER_REQUEST notified UI for test_55mb_ferry.bin from 10.213.207.31:45112
+2026-09-04 23:56:01,815 [INFO] ferry.transfer: Incoming transfer 12435ba7 started: test_55mb_ferry.bin (57671680 bytes, 880 chunks)
+2026-09-04 23:56:02,172 [INFO] ferry.service: TRANSFER_CANCEL received for 12435ba7 from 10.213.207.31:45112 (reason=USER_CANCELLED)
+2026-09-04 23:57:14,952 [ERROR] ferry.service: Session loop error with 10.213.207.31:45112: [Errno 104] Connection reset by peer

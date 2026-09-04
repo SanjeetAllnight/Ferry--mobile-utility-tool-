@@ -143,6 +143,9 @@ class FerryControlClient(
     private val outgoingCancelled = java.util.concurrent.atomic.AtomicBoolean(false)
     private val outgoingCancelledByPeer = java.util.concurrent.atomic.AtomicBoolean(false)
 
+    // Phase 3D: transfer IDs that have already been processed to terminal state (prevents duplicate handling)
+    private val handledTransferIds = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+
     // ── Public API ────────────────────────────────────────────────────────────
 
     fun cancelOutgoingTransfer(transferId: String? = null) {
@@ -432,10 +435,30 @@ class FerryControlClient(
         } catch (e: Exception) {
             Log.e(TAG, "Encrypted session loop ended", e)
         } finally {
+            // Phase 3D: Record FAILED history for any interrupted incoming transfer
+            val interruptedMeta = activeReceiverMeta
+            if (activeReceiver != null && interruptedMeta != null) {
+                Log.w(TAG, "Session dropped during incoming transfer ${interruptedMeta.transferId.take(8)} — marking FAILED")
+                appendHistory(
+                    TransferHistoryEntry(
+                        transferId = interruptedMeta.transferId,
+                        fileName = interruptedMeta.fileName,
+                        fileSize = interruptedMeta.fileSize,
+                        direction = TransferProgress.Direction.INCOMING,
+                        success = false,
+                        timestampMs = System.currentTimeMillis(),
+                    )
+                )
+            }
             activeReceiver?.cancel()
             activeReceiver = null
             activeReceiverMeta = null
             _incomingProgress.value = null
+            // Phase 3D: Unblock any sendFile() waiting for ACCEPT — avoids the 60s timeout being the only guard
+            pendingTransferAccept?.complete(false)
+            pendingTransferAccept = null
+            // Phase 3D: Clear outgoing progress
+            _transferProgress.value = null
             try { sess.transition(FerrySession.State.CLOSING) } catch (_: Exception) {}
             try { sess.transition(FerrySession.State.DISCONNECTED) } catch (_: Exception) {}
         }
@@ -488,7 +511,16 @@ class FerryControlClient(
                 onTransferComplete(sess, output, transferId)
             }
             ProtocolConstants.MessageTypes.TRANSFER_CANCEL -> {
-                Log.i(TAG, "TRANSFER_CANCEL received for ${transferId.take(8)}")
+                val tid = payload.optString("transfer_id", "")
+                Log.i(TAG, "TRANSFER_CANCEL received for ${tid.take(8)}")
+                // Phase 3D: idempotent — ignore if already terminal
+                if (tid.isNotEmpty() && handledTransferIds.contains(tid)) {
+                    Log.d(TAG, "Duplicate TRANSFER_CANCEL for $tid — ignoring")
+                    pendingTransferAccept?.complete(false)
+                    pendingTransferAccept = null
+                    return
+                }
+                if (tid.isNotEmpty()) handledTransferIds.add(tid)
                 activeReceiver?.cancel()
                 activeReceiver = null
                 activeReceiverMeta = null
@@ -509,11 +541,23 @@ class FerryControlClient(
             }
             ProtocolConstants.MessageTypes.TRANSFER_ACCEPT -> {
                 Log.i(TAG, "TRANSFER_ACCEPT received for ${transferId.take(8)}")
+                // Phase 3D: duplicate guard
+                if (transferId.isNotEmpty() && handledTransferIds.contains(transferId)) {
+                    Log.d(TAG, "Duplicate TRANSFER_ACCEPT for $transferId — ignoring")
+                    return
+                }
+                if (transferId.isNotEmpty()) handledTransferIds.add(transferId)
                 pendingTransferAccept?.complete(true)
                 pendingTransferAccept = null
             }
             ProtocolConstants.MessageTypes.TRANSFER_REJECT -> {
                 Log.w(TAG, "TRANSFER_REJECT received for ${transferId.take(8)}")
+                // Phase 3D: duplicate guard
+                if (transferId.isNotEmpty() && handledTransferIds.contains(transferId)) {
+                    Log.d(TAG, "Duplicate TRANSFER_REJECT for $transferId — ignoring")
+                    return
+                }
+                if (transferId.isNotEmpty()) handledTransferIds.add(transferId)
                 pendingTransferAccept?.complete(false)
                 pendingTransferAccept = null
             }
@@ -533,9 +577,21 @@ class FerryControlClient(
             val meta = TransferMetadata.fromJson(payload)
             stagingDir.mkdirs()
             val receiver = FerryTransferReceiver(meta, stagingDir)
+            // Phase 3D: guard begin() — failure to open staging file should not crash the session loop
+            try {
+                receiver.begin()
+            } catch (e: java.io.IOException) {
+                Log.e(TAG, "Cannot begin transfer ${meta.transferId.take(8)}: ${e.message}")
+                sendEncryptedMessage(sess, output, ProtocolConstants.MessageTypes.TRANSFER_ERROR,
+                    JSONObject().apply {
+                        put("transfer_id", meta.transferId)
+                        put("error_code", "ERR_IO_FAILURE")
+                        put("message", e.message ?: "staging file creation failed")
+                    })
+                return
+            }
             activeReceiver = receiver
             activeReceiverMeta = meta
-            receiver.begin()
 
             // Prime incoming progress
             _incomingProgress.value = TransferProgress(
@@ -565,6 +621,13 @@ class FerryControlClient(
             Log.w(TAG, "TRANSFER_COMPLETE for unknown transfer_id ${transferId.take(8)}")
             return
         }
+        // Phase 3D: duplicate guard
+        if (transferId.isNotEmpty() && handledTransferIds.contains(transferId)) {
+            Log.d(TAG, "Duplicate TRANSFER_COMPLETE for $transferId — ignoring")
+            return
+        }
+        if (transferId.isNotEmpty()) handledTransferIds.add(transferId)
+
         val meta = activeReceiverMeta
         val success = receiver.finalise()
         val fileName = meta?.fileName ?: transferId.take(8)
@@ -705,6 +768,7 @@ class FerryControlClient(
         sendEncryptedMessage(sess, out, ProtocolConstants.MessageTypes.TRANSFER_REQUEST, payload)
 
         // Wait for TRANSFER_ACCEPT via CompletableDeferred
+        // Phase 3D: Allocate the deferred AFTER resetting flags so a prior cancel flag cannot bleed in
         val acceptDeferred = CompletableDeferred<Boolean>()
         pendingTransferAccept = acceptDeferred
 
@@ -848,6 +912,11 @@ class FerryControlClient(
 
     private fun appendHistory(entry: TransferHistoryEntry) {
         val current = _transferHistory.value.toMutableList()
+        // Phase 3D: Prevent duplicate entries for the same transfer_id
+        if (current.any { it.transferId == entry.transferId }) {
+            Log.d(TAG, "Skipping duplicate history entry for ${entry.transferId.take(8)}")
+            return
+        }
         current.add(0, entry)
         if (current.size > 50) current.removeAt(current.lastIndex)
         _transferHistory.value = current

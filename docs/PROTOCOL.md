@@ -309,4 +309,28 @@ Fatal error, either side may send at any time during a transfer.
 * `ERR_IO_FAILURE`: Disk write or read failure.
 * `ERR_INTEGRITY_MISMATCH`: Final SHA-256 verification failed.
 * `ERR_TIMEOUT`: Peer failed to respond within required window.
+* `TIMEOUT_EXPIRED`: Incoming transfer auto-rejected after acceptance timeout (Phase 3D).
+
+---
+
+## 7. Timeout Policy (Phase 3D)
+
+All timeouts are enforced at the application layer:
+
+| Timeout | Value | Direction | Action on Expiry |
+|---|---|---|---|
+| `HANDSHAKE_TIMEOUT_SECS` | 30s | Both | Session closed; DISCONNECTED |
+| `AUTH_TIMEOUT_SECS` | 30s | Both | Session closed; DISCONNECTED |
+| `TRANSFER_RESPONSE_TIMEOUT_SECS` | 60s | Outgoing (Linux wait_for) | REJECTED logged; outgoing transfer FAILED |
+| `TRANSFER_ACCEPT_TIMEOUT_MS` | 60000ms | Outgoing (Android withTimeout) | REJECTED logged; outgoing transfer FAILED |
+| **`TRANSFER_ACCEPT_TIMEOUT_SECS`** | **120s** | **Incoming** | **Auto-REJECT sent; incoming transfer cleaned up** |
+| `TRANSFER_RESULT_TIMEOUT_SECS` | 60s | Outgoing | FAILED logged; transfer complete |
+| `TRANSFER_CHUNK_TIMEOUT_SECS` | 120s | Incoming (constant defined) | Stall detection reference value |
+
+**Acceptance timeout behavior (Phase 3D)**: When a `TRANSFER_REQUEST` arrives on Linux, a 120-second timer is started. If the user neither accepts nor rejects before the timer fires, the service automatically sends `TRANSFER_REJECT` with `reason: "TIMEOUT_EXPIRED"`, cancels the internal `IncomingTransfer`, and records a `REJECTED` history entry. The timer is cancelled immediately when the user accepts or rejects.
+
+**Session-disconnect behavior (Phase 3D)**: When a session disconnects for any reason (network error, peer disconnect, idle timeout), all active incoming and outgoing transfers for that peer are atomically cancelled:
+- Incoming: `.part` file deleted, FAILED history recorded, UI notified.
+- Outgoing: transfer cancelled, waiting events unblocked.
+
 

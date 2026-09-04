@@ -5,7 +5,7 @@ This document is the primary persistent context file for **Ferry**. It reflects 
 ---
 
 ### Current Phase: Phase 3 (File Transfer Execution)
-**Status:** In Progress — Phase 3C Fully Closed (Phase 3C.2 Acceptance Gates Passed)
+**Status:** In Progress — Phase 3D Complete (Transfer Reliability & Error Recovery)
 **Goal:** Implement file transfer capabilities between paired devices.
 
 ### Phase 3 Progress Tracking:
@@ -13,6 +13,7 @@ This document is the primary persistent context file for **Ferry**. It reflects 
 - **Phase 3B (Linux File Receiving & Transfer Approvals)**: Complete / Verified. `IncomingTransfer` refactored to parse directly to user's specified `download_dir`. Receiver `FerryService` extended to surface `TRANSFER_REQUEST` up to the UI. Fully integration tested on Linux and physically verified receiving a file from Android over Wi-Fi.
 - **Phase 3C / 3C.1 (Sender & Receiver UI / File Picking & Physical QA)**: Complete / Fully Verified. Full bidirectional user-facing file transfer experience physically verified on real Android device and Arch Linux desktop. Linux `Gtk.FileDialog` and Android SAF `GetContent` picker validated. Bidirectional streaming (up to 16.5 MB at ~11.8 MB/s), SHA-256 integrity verification, live UI progress, incoming transfer approval, and transfer history panels verified.
 - **Phase 3C.2 (Final Acceptance-Gate Verification & Discrepancy Resolution)**: Complete / Fully Verified. Resolved both remaining acceptance gate discrepancies: (1) native zero-byte (0-byte) file transfer support with SHA-256 `e3b0c442...` integrity verification, and (2) user-facing in-flight transfer cancellation UI buttons on GTK4 and Jetpack Compose with wire `TRANSFER_CANCEL` transmission, immediate `.part` cleanup, and `CANCELLED` history recording. 149/149 Linux unit tests and 52/52 Android unit tests passing (201 total). Phase 3C is officially CLOSED.
+- **Phase 3D (Transfer Reliability & Error Recovery)**: Complete / Verified. Hardened the transfer system against all real-world failure modes: network disconnects mid-transfer, disk-full during writes, source-file disappearance during streaming, duplicate control messages, stale `.part` files from prior crashes, and acceptance timeouts. Session-disconnect cleanup now cancels in-flight transfers, records FAILED history, and clears UI rows. Added `TransferError` exception, `_record_transfer_once` idempotency guard, 120s acceptance timeout, and `_cancel_incoming_transfer_for_peer` / `_cancel_outgoing_transfer_for_peer` peer-cleanup helpers. 161/161 Linux tests and 57/57 Android tests passing (218 total). APK build successful. Phase 3D is CLOSED.
 
 ### Previous Phase: Phase 2C (Interactive Trust & Identity Storage)
 **Status:** Complete / Verified
@@ -50,6 +51,26 @@ This document is the primary persistent context file for **Ferry**. It reflects 
 * [x] **Final Acceptance Gate Verification (Phase 3C.2)**:
   - 0-byte file transfers supported and physically validated end-to-end on real hardware.
   - User-facing UI Cancel buttons added to Linux GTK4 and Android Compose progress cards; wire `TRANSFER_CANCEL` and clean `.part` purge verified mid-flight.
+* [x] **Transfer Reliability & Error Recovery (Phase 3D)**:
+  - `TransferError` exception class for filesystem/IO failures during transfers.
+  - `IncomingTransfer.begin()`, `receive_chunk()`: OS errors caught, `.part` cleaned, state set to FAILED before re-raising.
+  - `IncomingTransfer.cancel()`: safe from any state (IDLE, ACCEPTED, TRANSFERRING, COMPLETED).
+  - `OutgoingTransfer.stream_chunks()`: guards `open()` and `read()` against `OSError`.
+  - Session-disconnect cleanup: `_cancel_incoming_transfer_for_peer()` and `_cancel_outgoing_transfer_for_peer()` called in `_run_session_loop` finally block.
+  - 120s acceptance timeout: incoming transfers auto-rejected if user doesn't respond.
+  - Idempotent history recording via `_record_transfer_once()` — prevents duplicate DB rows.
+  - Duplicate TRANSFER_COMPLETE / TRANSFER_CANCEL messages are silently ignored.
+  - UI transfer rows cleared on session disconnect with "Connection lost" label.
+  - Stale `.part` file cleanup on service `start()`.
+  - Android: session-dropout records FAILED history for interrupted incoming transfers.
+  - Android: `pendingTransferAccept.complete(false)` on session exit.
+  - Android: duplicate ACCEPT/REJECT/CANCEL/COMPLETE messages guarded via `handledTransferIds` set.
+  - Android: `appendHistory()` deduplicates by transfer_id.
+  - **161 Linux tests / 57 Android tests — all passing.**
+* [x] **Physical Reliability Acceptance Verification (Phase 3D.1)**:
+  - **PT-1** (Disconnect mid-transfer) validated on real hardware: `FAILED` state reached, `.part` purged.
+  - **PT-2** (User cancellation) validated on real hardware: `CANCELLED` state reached, `.part` purged.
+  - **PT-3** (Recovery/Retry) validated on real hardware: New transfer ID generated, completed successfully with exact 55 MiB file size and matching SHA-256 hash.
 
 ---
 
@@ -69,7 +90,7 @@ This document is the primary persistent context file for **Ferry**. It reflects 
 
 ### Linux
 ```bash
-# Run all unit and integration tests (149 tests)
+# Run all unit and integration tests (161 tests)
 PYTHONPATH=linux/src python3 -m unittest discover -s linux/tests -v
 
 # Run desktop UI with discovery active
@@ -81,7 +102,7 @@ PYTHONPATH=linux/src python3 -m ferry_linux --service
 
 ### Android
 ```bash
-# Run unit tests (52 tests)
+# Run unit tests (57 tests)
 cd android && ./gradlew testDebugUnitTest
 
 # Build debug APK
@@ -98,11 +119,12 @@ adb shell am start -n dev.ferry.app/.MainActivity
 
 ## 6. Known Limitations & Phase Boundary
 
-* **No Resumption (Phase 3D)**: File transfer resumption for interrupted transfers is planned for Phase 3D.
 * **Single Transfer at a Time**: Current architecture handles one active transfer at a time per peer session.
+* **No Chunk Stall Enforcement**: `TRANSFER_CHUNK_TIMEOUT_SECS = 120.0` is defined; last-chunk-time tracking is in place, but active per-transfer stall enforcement (a periodic asyncio task) is not yet implemented. The existing 300s session idle timeout remains the backstop.
+* **No Resumable Transfers**: A failed transfer_id is terminal. Users restart with a new transfer.
 
 ---
 
 ## 7. Next Recommended Task
 
-* **Phase 3D (Transfer Optimization, Error Recovery & Resumption)** or transition to next planned milestone.
+* **Phase 3E (Clipboard Sync / Notification Relay)** or next planned milestone per the roadmap.

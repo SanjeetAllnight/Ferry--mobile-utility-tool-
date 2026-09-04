@@ -279,6 +279,28 @@ class FerryMainWindow(Adw.ApplicationWindow):
             dlg = self._pairing_dialogs.pop(remote_addr, None)
             if dlg:
                 dlg.close()
+            # Phase 3D: Clear any stuck active transfer rows when connection drops
+            stuck = list(self._active_transfer_rows.keys())
+            for stuck_tid in stuck:
+                entry = self._active_transfer_rows.pop(stuck_tid, None)
+                if entry:
+                    row, progress_bar, size_label, total, cancel_btn = entry
+                    cancel_btn.set_visible(False)
+                    size_label.set_label("Lost ✗")
+                    row.set_subtitle("Connection lost")
+
+                    def _remove_row_closure(r=row):
+                        try:
+                            self._transfer_rows.remove(r)
+                            self.transfers_group.remove(r)
+                        except Exception:
+                            pass
+                        if not self._transfer_rows:
+                            self._show_transfers_empty()
+                        return False
+
+                    GLib.timeout_add(3000, _remove_row_closure)
+            self._update_transfer_history()
 
         if state in (SessionState.PAIRING, SessionState.WAITING_FOR_LOCAL_DECISION):
             if remote_addr in self._pairing_dialogs:

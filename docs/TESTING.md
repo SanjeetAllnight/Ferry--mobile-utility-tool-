@@ -38,7 +38,7 @@ This document outlines the testing strategy, test layers, and verification comma
   * `test_receiver.py`: Verifies Phase 3B Linux receiver event bus, interactive approval/rejection lifecycle, download directory resolution, and error handling.
 
 ```bash
-# Run all Linux tests (149 tests)
+# Run all Linux tests (161 tests)
 PYTHONPATH=linux/src python3 -m unittest discover -s linux/tests -v
 ```
 
@@ -51,7 +51,7 @@ PYTHONPATH=linux/src python3 -m unittest discover -s linux/tests -v
   * `TransferTest.kt`: Verifies transfer state machine, chunk calculation, 0-byte file support, and SHA-256 digest validation.
 
 ```bash
-# Run Android local unit tests (52 tests)
+# Run Android local unit tests (57 tests)
 cd android && ./gradlew testDebugUnitTest
 ```
 
@@ -64,6 +64,27 @@ cd android && ./gradlew testDebugUnitTest
   - Bidirectional transfers (up to 16.5 MB at ~11.8 MB/s) with live UI progress indicators verified.
   - Incoming transfer approval, cancellation mid-flight, and transfer history verified on physical Realme device and Arch Linux desktop.
   - See `docs/PHASE_3C.1_PHYSICAL_VERIFICATION.md` for full physical test log and hash comparisons.
+* **Phase 3D (Transfer Reliability & Error Recovery)**:
+  - 12 new reliability tests in `test_transfer.py` (class `TestPhase3DReliability`):
+    - IO error handling in `begin()`, `receive_chunk()` (disk-full scenario)
+    - `cancel()` safety from IDLE, ACCEPTED, COMPLETED states
+    - `stream_chunks()` source-file disappearance raises `TransferError`
+    - Integrity mismatch leaves no `.part` or final file
+    - `_record_transfer_once()` idempotency (no duplicate DB rows)
+    - `_cancel_incoming_transfer_for_peer()` cleans `.part` and fires callbacks
+    - Stale `.part` cleanup on service `start()`
+  - 5 new reliability tests in Android `TransferTest.kt` (tests 27–31):
+    - `cancel()` from IDLE is safe
+    - `receiveChunk()` after cancel throws `IllegalStateException`
+    - Integrity mismatch leaves no `.part` or final file
+    - `cancel()` after `finalise()` is safe
+    - Hash failure removes `.part` file
+  - **218 total tests: 161 Linux + 57 Android, all passing.**
+  - See `docs/PHASE_3D_REPORT.md` for full reliability audit and change log.
+* **Phase 3D.1 (Physical Reliability Acceptance Verification)**:
+  - Physical tests PT-1 (disconnect mid-transfer), PT-2 (Cancel via UI), PT-3 (Recovery after failure) executed manually with real Android device and Arch Linux desktop.
+  - All three tests PASSED: `.part` files correctly purged mid-flight, correct `FAILED`/`CANCELLED`/`COMPLETED` history entries recorded, Linux GUI did not freeze.
+  - See `docs/PHASE_3D.1_PHYSICAL_VERIFICATION.md` for the full physical test log and file hash comparisons.
 
 ---
 

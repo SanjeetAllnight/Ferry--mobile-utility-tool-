@@ -1,5 +1,5 @@
 """
-Ferry Transfer Layer — Phase 3A.
+Ferry Transfer Layer — Phase 3A / Phase 3D reliability hardening.
 
 Implements the reusable secure data transport for file transfers over an already-
 authenticated Ferry control session (ESTABLISHED state).
@@ -25,6 +25,14 @@ Security:
 - Temp files use transfer_id as a suffix; only renamed after SHA-256 passes.
 - Remote-supplied lengths are validated before allocation.
 - No private key material is used here; trust is inherited from Phase 2 auth.
+
+Phase 3D reliability additions:
+- TransferError exception for filesystem/IO errors during transfers.
+- IncomingTransfer.begin/receive_chunk/finalise: all OS errors are caught, temp
+  file is cleaned up, and state transitions to FAILED before re-raising.
+- IncomingTransfer.cancel(): safe to call from any state.
+- OutgoingTransfer.stream_chunks(): guards file-open and reads; raises TransferError
+  on IOError so the caller can send TRANSFER_CANCEL and record a FAILED history row.
 
 CRITICAL: Do not change the AEAD session keys or nonce counter in this module.
 """
@@ -64,6 +72,9 @@ MAX_CONCURRENT_TRANSFERS = 1
 # Idle timeout for stalled transfers (no chunk received within this window)
 TRANSFER_CHUNK_TIMEOUT_SECS = 120.0
 
+# Phase 3D: Timeout (seconds) for user to accept/reject an incoming transfer request
+TRANSFER_ACCEPT_TIMEOUT_SECS = 120.0
+
 
 # ─── Transfer State Machine ────────────────────────────────────────────────────
 
@@ -83,7 +94,8 @@ class TransferState(Enum):
 # Define valid state transitions after the class body
 TransferState.VALID_TRANSITIONS = {
     TransferState.IDLE:        {TransferState.REQUESTED, TransferState.ACCEPTED,
-                                TransferState.TRANSFERRING},
+                                TransferState.TRANSFERRING, TransferState.FAILED,
+                                TransferState.CANCELLED},
     TransferState.REQUESTED:   {TransferState.ACCEPTED, TransferState.FAILED,
                                 TransferState.CANCELLED},
     TransferState.ACCEPTED:    {TransferState.TRANSFERRING, TransferState.FAILED,
@@ -314,6 +326,19 @@ class SecurityError(Exception):
     """Raised when a security constraint is violated."""
 
 
+class TransferError(Exception):
+    """
+    Raised when a filesystem or I/O error occurs during an active transfer.
+
+    Distinct from SecurityError (which covers path-traversal attacks) and
+    ValueError (which covers protocol/framing errors).  Callers should:
+      - Clean up the .part file (already done by the object that raises).
+      - Transition the transfer state to FAILED (already done).
+      - Send TRANSFER_ERROR or TRANSFER_CANCEL to the peer.
+      - Record a FAILED entry in the transfer history DB.
+    """
+
+
 # ─── Incoming transfer session ────────────────────────────────────────────────
 
 class IncomingTransfer:
@@ -345,15 +370,30 @@ class IncomingTransfer:
         return self._bytes_received
 
     def begin(self) -> None:
-        """Open the temp file and transition to ACCEPTED."""
+        """Open the temp file and transition to ACCEPTED then TRANSFERRING.
+
+        Raises TransferError if the staging directory cannot be created or the
+        temporary file cannot be opened.  On error, the state transitions to
+        FAILED and no .part file is left open.
+        """
         self._state = _transfer_transition(self._state, TransferState.ACCEPTED)
         staging_dir = self._staging_dir
-        staging_dir.mkdir(parents=True, exist_ok=True)
-        self._download_dir.mkdir(parents=True, exist_ok=True)
-        temp_name = f"{self.meta.transfer_id}.part"
-        self._temp_path = staging_dir / temp_name
-        self._final_path = resolve_safe_destination(self._download_dir, self.meta.file_name)
-        self._temp_fh = open(self._temp_path, "wb")
+        try:
+            staging_dir.mkdir(parents=True, exist_ok=True)
+            self._download_dir.mkdir(parents=True, exist_ok=True)
+            temp_name = f"{self.meta.transfer_id}.part"
+            self._temp_path = staging_dir / temp_name
+            self._final_path = resolve_safe_destination(self._download_dir, self.meta.file_name)
+            self._temp_fh = open(self._temp_path, "wb")
+        except OSError as exc:
+            logger.error(
+                "Cannot open staging file for transfer %s: %s",
+                self.meta.transfer_id[:8], exc,
+            )
+            self._state = _transfer_transition(self._state, TransferState.FAILED)
+            raise TransferError(
+                f"Failed to open staging file for {self.meta.transfer_id[:8]}: {exc}"
+            ) from exc
         self._state = _transfer_transition(self._state, TransferState.TRANSFERRING)
         logger.info(
             "Incoming transfer %s started: %s (%d bytes, %d chunks)",
@@ -367,6 +407,8 @@ class IncomingTransfer:
 
         Raises ValueError on sequence mismatch or oversized payload.
         Raises RuntimeError if not in TRANSFERRING state.
+        Raises TransferError on disk I/O failure (disk full, permission denied, etc.);
+          the temp file is cleaned and state is set to FAILED before raising.
         """
         if self._state != TransferState.TRANSFERRING:
             raise RuntimeError(f"Cannot receive chunk in state {self._state.name}")
@@ -384,7 +426,17 @@ class IncomingTransfer:
                 f"Chunk payload {len(frame.data)} > declared chunk_size {self.meta.chunk_size}"
             )
 
-        self._temp_fh.write(frame.data)
+        try:
+            self._temp_fh.write(frame.data)
+        except OSError as exc:
+            logger.error(
+                "Disk I/O error writing chunk seq=%d for transfer %s: %s",
+                frame.seq, self.meta.transfer_id[:8], exc,
+            )
+            self._cleanup_on_io_error()
+            raise TransferError(
+                f"Disk write failed for transfer {self.meta.transfer_id[:8]}: {exc}"
+            ) from exc
         self._hasher.update(frame.data)
         self._bytes_received += len(frame.data)
         self._next_seq += 1
@@ -429,7 +481,10 @@ class IncomingTransfer:
         return True
 
     def cancel(self) -> None:
-        """Cancel the transfer and remove temp file."""
+        """Cancel the transfer and remove temp file.
+
+        Safe to call from any state; never raises.
+        """
         if self._temp_fh:
             try:
                 self._temp_fh.close()
@@ -437,18 +492,33 @@ class IncomingTransfer:
                 pass
             self._temp_fh = None
         self._cleanup_temp()
-        try:
-            self._state = _transfer_transition(self._state, TransferState.CANCELLING)
-            self._state = _transfer_transition(self._state, TransferState.CANCELLED)
-        except RuntimeError:
-            self._state = TransferState.CANCELLED
+        # Force into CANCELLED regardless of current state — cancel() must always succeed.
+        self._state = TransferState.CANCELLED
 
     def _cleanup_temp(self) -> None:
         if self._temp_path and self._temp_path.exists():
             try:
                 self._temp_path.unlink()
+                logger.debug(
+                    "Deleted staging file %s for transfer %s",
+                    self._temp_path.name, self.meta.transfer_id[:8],
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Could not delete staging file %s: %s",
+                    self._temp_path, exc,
+                )
+
+    def _cleanup_on_io_error(self) -> None:
+        """Close file handle, remove temp file, and set state to FAILED."""
+        if self._temp_fh:
+            try:
+                self._temp_fh.close()
             except Exception:
                 pass
+            self._temp_fh = None
+        self._cleanup_temp()
+        self._state = TransferState.FAILED
 
 
 # ─── Outgoing transfer session ────────────────────────────────────────────────
@@ -518,21 +588,48 @@ class OutgoingTransfer:
 
         The caller is responsible for encrypting each frame with the session's
         encrypt_frame() and writing to the transport.
+
+        Phase 3D: Raises TransferError if the source file cannot be opened or read
+        (e.g., file deleted mid-transfer, permission revoked, disk error).  State is
+        set to FAILED before raising so the caller can detect the terminal condition.
         """
         self._state = _transfer_transition(self._state, TransferState.TRANSFERRING)
         seq = 0
-        with open(self._source_path, "rb") as fh:
+        try:
+            fh = open(self._source_path, "rb")
+        except OSError as exc:
+            logger.error(
+                "Cannot open source file %s for transfer %s: %s",
+                self._source_path, self.transfer_id[:8], exc,
+            )
+            self._state = TransferState.FAILED
+            raise TransferError(
+                f"Cannot read source file for transfer {self.transfer_id[:8]}: {exc}"
+            ) from exc
+        try:
             while True:
                 if self._cancelled:
                     self._state = TransferState.CANCELLING
                     return
-                chunk = fh.read(CHUNK_SIZE)
+                try:
+                    chunk = fh.read(CHUNK_SIZE)
+                except OSError as exc:
+                    logger.error(
+                        "Read error at seq=%d for transfer %s: %s",
+                        seq, self.transfer_id[:8], exc,
+                    )
+                    self._state = TransferState.FAILED
+                    raise TransferError(
+                        f"Source read failed at seq {seq} for transfer {self.transfer_id[:8]}: {exc}"
+                    ) from exc
                 if not chunk:
                     break
                 frame_bytes = encode_chunk_frame(self.transfer_id, seq, chunk)
                 self._bytes_sent += len(chunk)
                 seq += 1
                 yield frame_bytes
+        finally:
+            fh.close()
         if not self._cancelled:
             self._state = _transfer_transition(self._state, TransferState.COMPLETED)
 

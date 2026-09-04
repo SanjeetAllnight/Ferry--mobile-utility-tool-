@@ -92,14 +92,27 @@ class FerryTransferReceiver(
 
     val bytesReceivedTotal: Long get() = bytesReceived
 
+    /** Set when the transfer fails; describes the cause. */
+    var failureCause: String? = null
+        private set
+
     /**
      * Open the temp file and transition to TRANSFERRING state.
      * Must be called after TRANSFER_ACCEPT is sent.
+     * @throws IllegalStateException if called in wrong state.
+     * @throws java.io.IOException if the staging directory or temp file cannot be created.
      */
     fun begin() {
         check(state == TransferState.IDLE) { "begin() called in state $state" }
         stagingDir.mkdirs()
-        tempFile.createNewFile()
+        try {
+            tempFile.createNewFile()
+        } catch (e: java.io.IOException) {
+            Log.e(TAG, "Cannot create staging file for ${meta.transferId.take(8)}: ${e.message}")
+            state = TransferState.FAILED
+            failureCause = e.message
+            throw e
+        }
         state = TransferState.TRANSFERRING
         Log.i(TAG, "Receiving transfer ${meta.transferId.take(8)}: ${meta.fileName} (${meta.fileSize} bytes)")
     }
@@ -109,6 +122,8 @@ class FerryTransferReceiver(
      *
      * @throws IllegalArgumentException on sequence mismatch, wrong transfer_id, or oversized data.
      * @throws IllegalStateException if not in TRANSFERRING state.
+     * @throws java.io.IOException if the disk write fails (e.g. disk full). The transfer is
+     *   cancelled and the .part file is deleted before throwing.
      */
     fun receiveChunk(transferId: String, seq: Int, data: ByteArray) {
         check(state == TransferState.TRANSFERRING) {
@@ -124,7 +139,15 @@ class FerryTransferReceiver(
             "Chunk payload ${data.size} > declared chunkSize ${meta.chunkSize}"
         }
 
-        tempFile.appendBytes(data)
+        try {
+            tempFile.appendBytes(data)
+        } catch (e: java.io.IOException) {
+            Log.e(TAG, "Disk write failed for transfer ${meta.transferId.take(8)} at seq $seq: ${e.message}")
+            cleanup()
+            state = TransferState.FAILED
+            failureCause = e.message
+            throw e
+        }
         digest.update(data)
         bytesReceived += data.size
         nextSeq++
@@ -167,6 +190,7 @@ class FerryTransferReceiver(
 
     /**
      * Cancel the transfer and remove the temp file.
+     * Safe to call from any state.
      */
     fun cancel() {
         cleanup()

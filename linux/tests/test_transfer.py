@@ -630,10 +630,10 @@ class TestTransferStateMachine(unittest.TestCase):
         s = _transfer_transition(TransferState.IDLE, TransferState.TRANSFERRING)
         self.assertEqual(s, TransferState.TRANSFERRING)
 
-    def test_invalid_idle_to_cancelled(self):
-        """IDLE→CANCELLED is not a valid direct transition."""
-        with self.assertRaises(RuntimeError):
-            _transfer_transition(TransferState.IDLE, TransferState.CANCELLED)
+    def test_idle_to_cancelled_now_valid(self):
+        """Phase 3D: IDLEu2192CANCELLED is now valid to allow cancel() from any state."""
+        s = _transfer_transition(TransferState.IDLE, TransferState.CANCELLED)
+        self.assertEqual(s, TransferState.CANCELLED)
 
     def test_invalid_completed_to_requested(self):
         with self.assertRaises(RuntimeError):
@@ -700,6 +700,247 @@ class TestProtocolModels(unittest.TestCase):
     def test_transfer_complete_payload(self):
         p = TransferCompletePayload(transfer_id="x")
         self.assertEqual(p.to_dict()["transfer_id"], "x")
+
+
+
+# ── Phase 3D Reliability Tests ─────────────────────────────────────────────
+
+class TestPhase3DReliability(unittest.IsolatedAsyncioTestCase):
+    """
+    Phase 3D reliability hardening tests.
+
+    Verify that transfer IO errors, cancels from unexpected states, source-file
+    disappearance, duplicate messages, and stale .part files are all handled
+    gracefully without leaving the system in a broken state.
+    """
+
+    def setUp(self):
+        self.tmpdir = Path(tempfile.mkdtemp())
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    # R01: begin() OSError transitions to FAILED
+    def test_r01_begin_ioerror_sets_failed_state(self):
+        """If staging dir is a file, begin() raises TransferError and sets FAILED."""
+        from ferry_linux.core.transfer import (
+            IncomingTransfer, TransferError, TransferState
+        )
+        meta = _make_meta(file_size=1024, chunk_size=CHUNK_SIZE)
+        blocker = self.tmpdir / "staging"
+        blocker.write_bytes(b"")
+
+        incoming = IncomingTransfer(meta=meta, download_dir=self.tmpdir)
+        incoming._staging_dir = blocker
+        incoming._download_dir = self.tmpdir
+
+        with self.assertRaises((TransferError, OSError)):
+            incoming.begin()
+
+        self.assertEqual(incoming.state, TransferState.FAILED)
+
+    # R02: receive_chunk() disk-full leaves no .part
+    def test_r02_receive_chunk_diskfull_cleans_temp(self):
+        """A failed write in receive_chunk() removes the .part file and sets FAILED."""
+        from ferry_linux.core.transfer import (
+            ChunkFrame, IncomingTransfer, TransferError, TransferState
+        )
+        import unittest.mock as mock
+
+        data = b"\xAB" * 1024
+        sha256 = hashlib.sha256(data).hexdigest()
+        meta = _make_meta(file_size=len(data), chunk_size=CHUNK_SIZE, sha256=sha256)
+        incoming = IncomingTransfer(meta=meta, download_dir=self.tmpdir)
+        incoming.begin()
+        self.assertTrue(incoming._temp_path.exists())
+
+        with mock.patch.object(incoming._temp_fh, "write", side_effect=OSError("No space left")):
+            frame = ChunkFrame(transfer_id=meta.transfer_id, seq=0, data=data)
+            with self.assertRaises((TransferError, OSError)):
+                incoming.receive_chunk(frame)
+
+        self.assertFalse(incoming._temp_path.exists())
+        self.assertEqual(incoming.state, TransferState.FAILED)
+
+    # R03: cancel() from IDLE does not raise
+    def test_r03_cancel_from_idle_does_not_raise(self):
+        """cancel() is safe to call on a never-started IncomingTransfer."""
+        from ferry_linux.core.transfer import IncomingTransfer, TransferState
+        meta = _make_meta()
+        incoming = IncomingTransfer(meta=meta, download_dir=self.tmpdir)
+        incoming.cancel()
+        self.assertEqual(incoming.state, TransferState.CANCELLED)
+
+    # R04: cancel() from ACCEPTED does not raise
+    def test_r04_cancel_from_accepted_does_not_raise(self):
+        """cancel() is safe to call after begin() but before any chunks."""
+        from ferry_linux.core.transfer import IncomingTransfer, TransferState
+        data = b"\xCC" * 64
+        sha256 = hashlib.sha256(data).hexdigest()
+        meta = _make_meta(file_size=len(data), chunk_size=CHUNK_SIZE, sha256=sha256)
+        incoming = IncomingTransfer(meta=meta, download_dir=self.tmpdir)
+        incoming.begin()
+        part = incoming._temp_path
+        self.assertTrue(part.exists())
+        incoming.cancel()
+        self.assertEqual(incoming.state, TransferState.CANCELLED)
+        self.assertFalse(part.exists())
+
+    # R05: stream_chunks() FileNotFoundError
+    async def test_r05_stream_chunks_source_disappears(self):
+        """If source file disappears before streaming, TransferError is raised."""
+        from ferry_linux.core.transfer import OutgoingTransfer, TransferError
+        src = self.tmpdir / "src.bin"
+        src.write_bytes(b"\xDD" * 512)
+        xfer = OutgoingTransfer(source_path=src, receiver_identity="")
+        src.unlink()
+        frames = []
+        with self.assertRaises((TransferError, FileNotFoundError, OSError)):
+            async for frame in xfer.stream_chunks():
+                frames.append(frame)
+
+    # R06: cancel() after COMPLETED is a no-op
+    def test_r06_cancel_from_completed_is_safe(self):
+        """cancel() after a successful finalise() must not raise."""
+        from ferry_linux.core.transfer import (
+            ChunkFrame, IncomingTransfer, TransferState
+        )
+        data = b"\x01" * 64
+        sha256 = hashlib.sha256(data).hexdigest()
+        meta = _make_meta(file_size=len(data), chunk_size=CHUNK_SIZE, sha256=sha256)
+        incoming = IncomingTransfer(meta=meta, download_dir=self.tmpdir)
+        incoming.begin()
+        incoming.receive_chunk(ChunkFrame(meta.transfer_id, 0, data))
+        result = incoming.finalise()
+        self.assertTrue(result)
+        incoming.cancel()
+        self.assertEqual(incoming.state, TransferState.CANCELLED)
+
+    # R07: integrity mismatch leaves no final file
+    def test_r07_integrity_mismatch_no_file_published(self):
+        """A SHA-256 mismatch in finalise() deletes the .part file; no final file."""
+        from ferry_linux.core.transfer import (
+            ChunkFrame, IncomingTransfer, TransferState
+        )
+        data = b"\x02" * 64
+        bad_sha256 = "b" * 64
+        meta = _make_meta(file_size=len(data), chunk_size=CHUNK_SIZE, sha256=bad_sha256)
+        incoming = IncomingTransfer(meta=meta, download_dir=self.tmpdir)
+        incoming.begin()
+        incoming.receive_chunk(ChunkFrame(meta.transfer_id, 0, data))
+        result = incoming.finalise()
+        self.assertFalse(result)
+        self.assertEqual(incoming.state, TransferState.FAILED)
+        self.assertFalse(incoming._temp_path.exists())
+        final = self.tmpdir / meta.file_name
+        self.assertFalse(final.exists())
+
+    # R08: TransferError is importable and inherits Exception
+    def test_r08_transfer_error_is_exception(self):
+        """TransferError is an Exception subclass."""
+        from ferry_linux.core.transfer import TransferError
+        err = TransferError("disk full")
+        self.assertIsInstance(err, Exception)
+        self.assertEqual(str(err), "disk full")
+
+    # R09: duplicate history protection
+    def test_r09_duplicate_history_protection(self):
+        """_record_transfer_once() with the same transfer_id is idempotent."""
+        from ferry_linux.core.service import FerryService
+        from ferry_linux.core.config import FerryConfig
+        from unittest.mock import MagicMock
+
+        config = FerryConfig(download_dir=str(self.tmpdir))
+        svc = FerryService()
+        svc.config = config
+        mock_db = MagicMock()
+        svc.db = mock_db
+
+        tid = str(uuid.uuid4())
+        for _ in range(3):
+            svc._record_transfer_once(
+                transfer_id=tid, device_id="device-1",
+                file_name="test.bin", file_size=1024,
+                direction="OUTGOING", status="COMPLETED",
+                started_at=0, sha256="a" * 64,
+            )
+        self.assertEqual(mock_db.add_transfer.call_count, 1)
+
+    # R10: cancel_incoming_transfer_for_peer cleans .part and fires callbacks
+    def test_r10_cancel_incoming_for_peer_cleans_up(self):
+        """_cancel_incoming_transfer_for_peer cleans .part and records FAILED."""
+        from ferry_linux.core.service import FerryService, PeerSession
+        from ferry_linux.core.config import FerryConfig
+        from ferry_linux.core.transfer import IncomingTransfer, ChunkFrame
+        from unittest.mock import MagicMock
+
+        config = FerryConfig(download_dir=str(self.tmpdir))
+        svc = FerryService()
+        svc.config = config
+        mock_db = MagicMock()
+        svc.db = mock_db
+
+        mock_sess = MagicMock()
+        ps = PeerSession(mock_sess, MagicMock(), MagicMock(), "10.0.0.5:5173")
+        ps.remote_device_id = "phone-001"
+
+        data = b"\x03" * 64
+        sha256 = hashlib.sha256(data).hexdigest()
+        meta = _make_meta(file_size=len(data), chunk_size=CHUNK_SIZE, sha256=sha256)
+        incoming = IncomingTransfer(meta=meta, download_dir=self.tmpdir)
+        incoming.begin()
+        part_path = incoming._temp_path
+        self.assertTrue(part_path.exists())
+
+        svc._incoming_transfers[meta.transfer_id] = incoming
+        svc._incoming_peers[meta.transfer_id] = ps
+
+        complete_cb = MagicMock()
+        svc.add_transfer_complete_listener(complete_cb)
+
+        svc._cancel_incoming_transfer_for_peer(ps)
+
+        self.assertFalse(part_path.exists())
+        self.assertEqual(mock_db.add_transfer.call_count, 1)
+        complete_cb.assert_called_once()
+        self.assertFalse(complete_cb.call_args[0][1])  # success=False
+
+    # R11: IDLE->FAILED transition now valid (Phase 3D)
+    def test_r11_idle_to_failed_now_valid(self):
+        """Phase 3D: IDLE->FAILED is a valid transition (e.g. begin() throws)."""
+        s = _transfer_transition(TransferState.IDLE, TransferState.FAILED)
+        self.assertEqual(s, TransferState.FAILED)
+
+    # R12: stale .part file cleanup on start
+    async def test_r12_stale_part_cleanup_on_start(self):
+        """Service.start() removes .part files from a previous crashed session."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from ferry_linux.core.service import FerryService
+        from ferry_linux.core.config import FerryConfig
+
+        staging = self.tmpdir / "staging"
+        staging.mkdir()
+        stale = staging / "deadbeef-0000-0000-0000-000000000001.part"
+        stale.write_bytes(b"\xDE\xAD" * 100)
+        self.assertTrue(stale.exists())
+
+        config = FerryConfig(download_dir=str(self.tmpdir))
+        svc = FerryService()
+        svc.config = config
+
+        mock_server = MagicMock()
+        mock_server.wait_closed = AsyncMock()
+
+        with patch.object(svc.discovery, "start", new=AsyncMock()), \
+             patch("asyncio.start_server", new=AsyncMock(return_value=mock_server)):
+            await svc.start()
+            # Verify stale cleanup happened during start (before the server starts)
+            self.assertFalse(stale.exists())
+            # Cleanly stop (the mock server has wait_closed as AsyncMock)
+            with patch.object(svc.discovery, "stop", new=AsyncMock()):
+                await svc.stop()
+
 
 
 if __name__ == "__main__":
