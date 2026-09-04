@@ -48,6 +48,11 @@ class MessageType(str, Enum):
     TRANSFER_RESULT = "TRANSFER_RESULT"      # receiver → sender: integrity verdict
     TRANSFER_ERROR = "TRANSFER_ERROR"        # either direction: fatal error
 
+    # Resumable File Transfer (Phase 3E Task 2)
+    TRANSFER_RESUME_REQUEST = "TRANSFER_RESUME_REQUEST"  # receiver → sender: negotiate resume
+    TRANSFER_RESUME_ACCEPT = "TRANSFER_RESUME_ACCEPT"    # sender → receiver: accept resume
+    TRANSFER_RESUME_REJECT = "TRANSFER_RESUME_REJECT"    # sender → receiver: reject resume
+
 
 @dataclass
 class TransferRequestPayload:
@@ -151,6 +156,194 @@ class TransferErrorPayload:
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
+
+
+class ResumeRejectReason(str, Enum):
+    """
+    Phase 3E Task 2 allowed reasons for TRANSFER_RESUME_REJECT.
+    """
+    SOURCE_MODIFIED = "SOURCE_MODIFIED"
+    TRANSFER_NOT_FOUND = "TRANSFER_NOT_FOUND"
+    PARTIAL_CORRUPT = "PARTIAL_CORRUPT"
+    WRONG_PEER = "WRONG_PEER"
+    STALE = "STALE"
+    PEER_CANCELLED = "PEER_CANCELLED"
+
+
+@dataclass
+class TransferResumeRequestPayload:
+    """
+    Phase 3E Task 2 TRANSFER_RESUME_REQUEST payload.
+    Sent by the receiver to request resumption of an interrupted transfer.
+    """
+    transfer_id: str
+    resume_offset_bytes: int
+    resume_chunk_index: int
+    partial_sha256: str
+    protocol_version: int = PROTOCOL_VERSION
+
+    def __post_init__(self) -> None:
+        self.validate()
+
+    def validate(self, chunk_size: int = 65536) -> None:
+        # Validate UUID format
+        if not isinstance(self.transfer_id, str) or not self.transfer_id:
+            raise ValueError(f"transfer_id must be a non-empty UUID string, got {self.transfer_id!r}")
+        try:
+            uuid.UUID(self.transfer_id)
+        except Exception as exc:
+            raise ValueError(f"Invalid transfer_id UUID format: {self.transfer_id!r}") from exc
+
+        # Non-negative offset
+        if not isinstance(self.resume_offset_bytes, int) or isinstance(self.resume_offset_bytes, bool) or self.resume_offset_bytes < 0:
+            raise ValueError(f"resume_offset_bytes must be a non-negative integer, got {self.resume_offset_bytes!r}")
+        if self.resume_offset_bytes > 10 * 1024 ** 3:
+            raise ValueError(f"resume_offset_bytes exceeds reasonable bound (10 GiB limit): {self.resume_offset_bytes}")
+
+        # Non-negative chunk index
+        if not isinstance(self.resume_chunk_index, int) or isinstance(self.resume_chunk_index, bool) or self.resume_chunk_index < 0:
+            raise ValueError(f"resume_chunk_index must be a non-negative integer, got {self.resume_chunk_index!r}")
+
+        # Protocol version
+        if not isinstance(self.protocol_version, int) or isinstance(self.protocol_version, bool) or self.protocol_version != PROTOCOL_VERSION:
+            raise ValueError(f"Invalid protocol_version: {self.protocol_version!r} (expected {PROTOCOL_VERSION})")
+
+        # 64-character lowercase hex SHA-256
+        if not isinstance(self.partial_sha256, str):
+            raise ValueError("partial_sha256 must be a string")
+        if len(self.partial_sha256) != 64 or not all(c in "0123456789abcdef" for c in self.partial_sha256):
+            raise ValueError(f"partial_sha256 must be a 64-character lowercase hex string: {self.partial_sha256!r}")
+
+        # Consistency between offset and chunk index
+        if chunk_size <= 0:
+            raise ValueError(f"chunk_size must be positive, got {chunk_size}")
+        if self.resume_chunk_index == 0 and self.resume_offset_bytes != 0:
+            raise ValueError(
+                f"Offset/chunk mismatch: resume_chunk_index is 0 but resume_offset_bytes is {self.resume_offset_bytes}"
+            )
+        if self.resume_offset_bytes != self.resume_chunk_index * chunk_size:
+            raise ValueError(
+                f"Offset/chunk mismatch: resume_offset_bytes {self.resume_offset_bytes} != "
+                f"resume_chunk_index {self.resume_chunk_index} * chunk_size {chunk_size} "
+                f"(expected {self.resume_chunk_index * chunk_size})"
+            )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    def __getitem__(self, item: str) -> Any:
+        return getattr(self, item)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any], chunk_size: int = 65536) -> "TransferResumeRequestPayload":
+        required = ("transfer_id", "resume_offset_bytes", "resume_chunk_index", "partial_sha256", "protocol_version")
+        for field_name in required:
+            if field_name not in data:
+                raise ValueError(f"Missing required field in TRANSFER_RESUME_REQUEST payload: {field_name}")
+
+        inst = cls(
+            transfer_id=str(data["transfer_id"]),
+            resume_offset_bytes=data["resume_offset_bytes"] if isinstance(data["resume_offset_bytes"], int) and not isinstance(data["resume_offset_bytes"], bool) else int(data["resume_offset_bytes"]),
+            resume_chunk_index=data["resume_chunk_index"] if isinstance(data["resume_chunk_index"], int) and not isinstance(data["resume_chunk_index"], bool) else int(data["resume_chunk_index"]),
+            partial_sha256=str(data["partial_sha256"]),
+            protocol_version=data["protocol_version"] if isinstance(data["protocol_version"], int) and not isinstance(data["protocol_version"], bool) else int(data["protocol_version"]),
+        )
+        inst.validate(chunk_size=chunk_size)
+        return inst
+
+
+@dataclass
+class TransferResumeAcceptPayload:
+    """
+    Phase 3E Task 2 TRANSFER_RESUME_ACCEPT payload.
+    Sent by the sender confirming resume acceptance.
+    """
+    transfer_id: str
+    resume_chunk_index: int
+    protocol_version: int = PROTOCOL_VERSION
+
+    def __post_init__(self) -> None:
+        self.validate()
+
+    def validate(self) -> None:
+        if not isinstance(self.transfer_id, str) or not self.transfer_id:
+            raise ValueError(f"transfer_id must be a non-empty UUID string, got {self.transfer_id!r}")
+        try:
+            uuid.UUID(self.transfer_id)
+        except Exception as exc:
+            raise ValueError(f"Invalid transfer_id UUID format: {self.transfer_id!r}") from exc
+
+        if not isinstance(self.resume_chunk_index, int) or isinstance(self.resume_chunk_index, bool) or self.resume_chunk_index < 0:
+            raise ValueError(f"resume_chunk_index must be a non-negative integer, got {self.resume_chunk_index!r}")
+
+        if not isinstance(self.protocol_version, int) or isinstance(self.protocol_version, bool) or self.protocol_version != PROTOCOL_VERSION:
+            raise ValueError(f"Invalid protocol_version: {self.protocol_version!r} (expected {PROTOCOL_VERSION})")
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    def __getitem__(self, item: str) -> Any:
+        return getattr(self, item)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "TransferResumeAcceptPayload":
+        required = ("transfer_id", "resume_chunk_index", "protocol_version")
+        for field_name in required:
+            if field_name not in data:
+                raise ValueError(f"Missing required field in TRANSFER_RESUME_ACCEPT payload: {field_name}")
+
+        inst = cls(
+            transfer_id=str(data["transfer_id"]),
+            resume_chunk_index=data["resume_chunk_index"] if isinstance(data["resume_chunk_index"], int) and not isinstance(data["resume_chunk_index"], bool) else int(data["resume_chunk_index"]),
+            protocol_version=data["protocol_version"] if isinstance(data["protocol_version"], int) and not isinstance(data["protocol_version"], bool) else int(data["protocol_version"]),
+        )
+        inst.validate()
+        return inst
+
+
+@dataclass
+class TransferResumeRejectPayload:
+    """
+    Phase 3E Task 2 TRANSFER_RESUME_REJECT payload.
+    Sent by the sender declining resume.
+    """
+    transfer_id: str
+    reason: str
+
+    def __post_init__(self) -> None:
+        self.validate()
+
+    def validate(self) -> None:
+        if not isinstance(self.transfer_id, str) or not self.transfer_id:
+            raise ValueError(f"transfer_id must be a non-empty UUID string, got {self.transfer_id!r}")
+        try:
+            uuid.UUID(self.transfer_id)
+        except Exception as exc:
+            raise ValueError(f"Invalid transfer_id UUID format: {self.transfer_id!r}") from exc
+
+        allowed = {r.value for r in ResumeRejectReason}
+        if self.reason not in allowed:
+            raise ValueError(f"Invalid reject reason: {self.reason!r} (allowed: {sorted(allowed)})")
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    def __getitem__(self, item: str) -> Any:
+        return getattr(self, item)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "TransferResumeRejectPayload":
+        required = ("transfer_id", "reason")
+        for field_name in required:
+            if field_name not in data:
+                raise ValueError(f"Missing required field in TRANSFER_RESUME_REJECT payload: {field_name}")
+
+        inst = cls(
+            transfer_id=str(data["transfer_id"]),
+            reason=str(data["reason"]),
+        )
+        inst.validate()
+        return inst
 
 
 @dataclass

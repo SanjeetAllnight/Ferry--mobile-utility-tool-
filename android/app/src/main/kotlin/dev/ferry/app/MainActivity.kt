@@ -29,7 +29,7 @@ class MainActivity : ComponentActivity() {
 
         identity = FerryIdentity(applicationContext)
         trustStore = FerryTrustStore(applicationContext)
-        controlClient = FerryControlClient(identity, trustStore)
+        controlClient = FerryControlClient(identity, trustStore, applicationContext)
         discoveryEngine = FerryDiscoveryEngine(applicationContext)
 
         Log.i(

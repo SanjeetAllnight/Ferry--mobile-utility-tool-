@@ -167,3 +167,39 @@ Total header: 28 bytes. Selected chunk payload size: 64 KiB.
 - Transfer resumability (sequence numbers present) deferred to a later phase
 - The data channel is as secure as the control channel; no new crypto is introduced
 
+
+---
+
+## ADR 008 — Resumable Transfer Architecture (Phase 3E Design)
+
+**Date:** 2026-09-05  
+**Status:** Design Accepted / Not Yet Implemented
+
+### Context
+
+Phase 3D confirmed that interrupted transfers terminate cleanly (`.part` deleted, FAILED recorded). This is correct for reliability, but sub-optimal for large files. Users sending multi-GB files over Wi-Fi should not have to restart from byte 0 after a network dropout.
+
+### Decision
+
+Design a receiver-initiated, sender-verified resume protocol that:
+1. Preserves the original `transfer_id` as the stable resume key.
+2. Keeps the `.part` file on interruption in a new `INTERRUPTED` state (with 7-day TTL).
+3. Uses a prefix SHA-256 cross-check (receiver hashes `.part`; sender hashes the same-length source prefix) to verify partial integrity before resuming.
+4. Uses **fresh session keys** for resumed chunks — never reuses old session AEAD keys.
+5. Adds three new control messages: `TRANSFER_RESUME_REQUEST`, `TRANSFER_RESUME_ACCEPT`, `TRANSFER_RESUME_REJECT`.
+6. Requires the peer to be fully authenticated (Ed25519 session) before any resume message is processed.
+
+### Alternatives Considered
+
+* **Chunk-level hashes in a manifest sidecar file**: Adds complexity; no security benefit beyond AEAD session integrity + final SHA-256.
+* **Sender-initiated resume**: More complex state; sender may not know which transfers the receiver can resume.
+* **Resuming with original session keys**: Requires persisting private ephemeral key material — violates the security model and creates a key-reuse risk.
+* **New transfer_id on resume**: Creates a two-row DB problem; old `.part` orphaned.
+
+### Consequences
+
+* `.part` files may accumulate on disk; mitigated by 7-day TTL and explicit discard UI.
+* Android requires Room persistence (currently history is in-memory only).
+* SAF URI persistence requires `takePersistableUriPermission()` at send time.
+* Prefix SHA-256 computation is O(N) for each resume; acceptable for background thread.
+* Old Ferry peers that don't support resume receive `ERR_UNKNOWN_MESSAGE` and gracefully fall back to full-restart.

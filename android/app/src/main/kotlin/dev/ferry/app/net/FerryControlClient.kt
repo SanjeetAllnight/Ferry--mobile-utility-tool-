@@ -11,7 +11,9 @@ import dev.ferry.app.security.FerryIdentity
 import dev.ferry.app.security.FerrySession
 import dev.ferry.app.transfer.FerryTransferClient
 import dev.ferry.app.transfer.FerryTransferReceiver
+import dev.ferry.app.transfer.InterruptedTransferStore
 import dev.ferry.app.transfer.TransferMetadata
+import dev.ferry.app.transfer.TransferState
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -53,6 +55,7 @@ import java.util.UUID
 class FerryControlClient(
     private val identity: FerryIdentity,
     private val trustStore: FerryTrustStore,
+    private val context: android.content.Context,
 ) {
 
     companion object {
@@ -115,6 +118,10 @@ class FerryControlClient(
     /** Most-recent-first list of completed transfers. */
     val transferHistory: StateFlow<List<TransferHistoryEntry>> = _transferHistory.asStateFlow()
 
+    /** Phase 3E: interrupted (resumable) transfers; updated on peer reconnect and on interrupt. */
+    private val _interruptedTransfers = MutableStateFlow<List<InterruptedTransferStore.InterruptedRecord>>(emptyList())
+    val interruptedTransfers: StateFlow<List<InterruptedTransferStore.InterruptedRecord>> = _interruptedTransfers.asStateFlow()
+
     // ── Internal state ────────────────────────────────────────────────────────
 
     private var pendingPeerId: String? = null
@@ -145,6 +152,14 @@ class FerryControlClient(
 
     // Phase 3D: transfer IDs that have already been processed to terminal state (prevents duplicate handling)
     private val handledTransferIds = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+
+    // Phase 3E: interrupted transfer persistence
+    private val interruptedStore: InterruptedTransferStore by lazy { InterruptedTransferStore(context) }
+
+    // Phase 3E: CompletableDeferred for TRANSFER_RESUME_ACCEPT/REJECT
+    @Volatile private var pendingResumeAccept: CompletableDeferred<Boolean>? = null
+    // Phase 3E: peer static key at the time the session was established (for interrupt records)
+    @Volatile private var connectedPeerStaticB64: String? = null
 
     // ── Public API ────────────────────────────────────────────────────────────
 
@@ -277,9 +292,16 @@ class FerryControlClient(
 
             val isTrusted = trustStore.isKnownPeer(remoteStaticB64)
             if (isTrusted) {
+                connectedPeerStaticB64 = remoteStaticB64
                 sess.transition(FerrySession.State.ESTABLISHED)
                 _sessionState.value = FerrySession.State.ESTABLISHED
                 Log.i(TAG, "Session ESTABLISHED with $remoteDeviceName")
+                // Phase 3E: load interrupted transfers from this peer
+                val interrupted = interruptedStore.listForSender(remoteStaticB64)
+                if (interrupted.isNotEmpty()) {
+                    Log.i(TAG, "Found ${interrupted.size} interrupted transfer(s) from $remoteDeviceName")
+                    _interruptedTransfers.value = interrupted
+                }
                 runEncryptedSessionLoop(sess, input, output)
             } else {
                 sess.transition(FerrySession.State.PAIRING)
@@ -435,30 +457,71 @@ class FerryControlClient(
         } catch (e: Exception) {
             Log.e(TAG, "Encrypted session loop ended", e)
         } finally {
-            // Phase 3D: Record FAILED history for any interrupted incoming transfer
+            // Phase 3E: Interrupt-on-disconnect for eligible incoming transfers.
+            val receiver = activeReceiver
             val interruptedMeta = activeReceiverMeta
-            if (activeReceiver != null && interruptedMeta != null) {
-                Log.w(TAG, "Session dropped during incoming transfer ${interruptedMeta.transferId.take(8)} — marking FAILED")
-                appendHistory(
-                    TransferHistoryEntry(
+            if (receiver != null && interruptedMeta != null) {
+                val interrupted = receiver.interrupt()
+                val peerKey = connectedPeerStaticB64 ?: ""
+                if (interrupted >= 0L && peerKey.isNotBlank()) {
+                    // Eligible for resume: persist the record.
+                    Log.i(
+                        TAG,
+                        "Session dropped during incoming transfer ${interruptedMeta.transferId.take(8)} " +
+                            "— INTERRUPTED at $interrupted bytes, persisting for resume"
+                    )
+                    val nowMs = System.currentTimeMillis()
+                    val record = InterruptedTransferStore.InterruptedRecord(
                         transferId = interruptedMeta.transferId,
                         fileName = interruptedMeta.fileName,
                         fileSize = interruptedMeta.fileSize,
-                        direction = TransferProgress.Direction.INCOMING,
-                        success = false,
-                        timestampMs = System.currentTimeMillis(),
+                        mimeType = interruptedMeta.mimeType,
+                        sha256 = interruptedMeta.sha256,
+                        chunkSize = interruptedMeta.chunkSize,
+                        chunkCount = interruptedMeta.chunkCount,
+                        senderIdentity = peerKey,
+                        receiverIdentity = identity.publicKeyB64,
+                        originalMetadataJson = interruptedMeta.toJson().toString(),
+                        bytesReceived = interrupted,
+                        resumeChunkIndex = (interrupted / interruptedMeta.chunkSize).toInt(),
+                        partialSha256 = "",   // populated by requestResume() on demand
+                        interruptedAt = nowMs,
+                        expireAt = InterruptedTransferStore.makeExpireAt(nowMs),
+                        direction = InterruptedTransferStore.InterruptedRecord.Direction.INCOMING,
+                        contentUriString = null,
                     )
-                )
+                    interruptedStore.save(record)
+                    _interruptedTransfers.value = interruptedStore.listForSender(peerKey)
+                } else {
+                    // Not eligible: cancel normally and record FAILED history.
+                    Log.w(TAG, "Session dropped during incoming transfer ${interruptedMeta.transferId.take(8)} — marking FAILED")
+                    appendHistory(
+                        TransferHistoryEntry(
+                            transferId = interruptedMeta.transferId,
+                            fileName = interruptedMeta.fileName,
+                            fileSize = interruptedMeta.fileSize,
+                            direction = TransferProgress.Direction.INCOMING,
+                            success = false,
+                            timestampMs = System.currentTimeMillis(),
+                        )
+                    )
+                    activeReceiver?.cancel()
+                }
+            } else {
+                activeReceiver?.cancel()
             }
-            activeReceiver?.cancel()
             activeReceiver = null
             activeReceiverMeta = null
             _incomingProgress.value = null
-            // Phase 3D: Unblock any sendFile() waiting for ACCEPT — avoids the 60s timeout being the only guard
+            // Phase 3D: Unblock any sendFile() waiting for ACCEPT
             pendingTransferAccept?.complete(false)
             pendingTransferAccept = null
+            // Phase 3E: Unblock any pending resume accept
+            pendingResumeAccept?.complete(false)
+            pendingResumeAccept = null
             // Phase 3D: Clear outgoing progress
             _transferProgress.value = null
+            connectedPeerStaticB64 = null
             try { sess.transition(FerrySession.State.CLOSING) } catch (_: Exception) {}
             try { sess.transition(FerrySession.State.DISCONNECTED) } catch (_: Exception) {}
         }
@@ -561,6 +624,79 @@ class FerryControlClient(
                 pendingTransferAccept?.complete(false)
                 pendingTransferAccept = null
             }
+            // Phase 3E: sender receives TRANSFER_RESUME_REQUEST from receiver
+            ProtocolConstants.MessageTypes.TRANSFER_RESUME_REQUEST -> {
+                val tid = payload.optString("transfer_id", "")
+                val resumeChunkIndex = payload.optInt("resume_chunk_index", 0)
+                val resumeOffsetBytes = payload.optLong("resume_offset_bytes", 0L)
+                val partialSha256 = payload.optString("partial_sha256", "")
+                Log.i(TAG, "TRANSFER_RESUME_REQUEST for ${tid.take(8)} (chunk=$resumeChunkIndex, offset=$resumeOffsetBytes)")
+                // Android is sender side — we respond on a background coroutine
+                // (streaming is blocking I/O and must not block the message loop).
+                scope.launch {
+                    onResumeRequest(sess, output, tid, resumeChunkIndex, resumeOffsetBytes.toInt(), partialSha256)
+                }
+            }
+
+            // Phase 3E: receiver receives TRANSFER_RESUME_ACCEPT from sender
+            ProtocolConstants.MessageTypes.TRANSFER_RESUME_ACCEPT -> {
+                val tid = payload.optString("transfer_id", "")
+                val resumeChunkIndex = payload.optInt("resume_chunk_index", 0)
+                Log.i(TAG, "TRANSFER_RESUME_ACCEPT for ${tid.take(8)} (chunk=$resumeChunkIndex)")
+                val receiver = activeReceiver
+                if (receiver != null && activeReceiverMeta?.transferId == tid) {
+                    try {
+                        receiver.resume(resumeChunkIndex)
+                        pendingResumeAccept?.complete(true)
+                        pendingResumeAccept = null
+                        // Remove from interrupted store — we are now actively resuming.
+                        interruptedStore.delete(tid)
+                        _interruptedTransfers.value = interruptedStore.listForSender(connectedPeerStaticB64 ?: "")
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Failed to resume receiver for $tid: ${e.message}")
+                        activeReceiver?.cancel()
+                        activeReceiver = null
+                        activeReceiverMeta = null
+                        _incomingProgress.value = null
+                        pendingResumeAccept?.complete(false)
+                        pendingResumeAccept = null
+                    }
+                } else {
+                    Log.w(TAG, "TRANSFER_RESUME_ACCEPT for unknown/unregistered transfer ${tid.take(8)}")
+                    pendingResumeAccept?.complete(true)
+                    pendingResumeAccept = null
+                }
+            }
+
+            // Phase 3E: receiver receives TRANSFER_RESUME_REJECT from sender
+            ProtocolConstants.MessageTypes.TRANSFER_RESUME_REJECT -> {
+                val tid = payload.optString("transfer_id", "")
+                val reason = payload.optString("reason", "UNKNOWN")
+                Log.w(TAG, "TRANSFER_RESUME_REJECT for ${tid.take(8)} (reason=$reason)")
+                // Clean up receiver and .part file
+                activeReceiver?.cancel()
+                activeReceiver = null
+                val meta = activeReceiverMeta
+                activeReceiverMeta = null
+                _incomingProgress.value = null
+                // Record as FAILED
+                if (meta != null) {
+                    appendHistory(TransferHistoryEntry(
+                        transferId = tid,
+                        fileName = meta.fileName,
+                        fileSize = meta.fileSize,
+                        direction = TransferProgress.Direction.INCOMING,
+                        success = false,
+                        timestampMs = System.currentTimeMillis(),
+                    ))
+                }
+                // Remove from interrupted store
+                interruptedStore.delete(tid)
+                _interruptedTransfers.value = interruptedStore.listForSender(connectedPeerStaticB64 ?: "")
+                pendingResumeAccept?.complete(false)
+                pendingResumeAccept = null
+            }
+
             else -> Log.w(TAG, "Unhandled transfer message type: $type")
         }
     }
@@ -654,6 +790,295 @@ class FerryControlClient(
                 timestampMs = System.currentTimeMillis(),
             )
         )
+    }
+
+    // ── Phase 3E Resume APIs ──────────────────────────────────────────────────
+
+    /**
+     * Phase 3E public API — Request resumption of an interrupted incoming transfer.
+     *
+     * Reconstructs a FerryTransferReceiver in INTERRUPTED state from the stored
+     * InterruptedRecord, computes the partial_sha256 of the .part file, sends
+     * TRANSFER_RESUME_REQUEST, and waits up to 120 seconds for ACCEPT or REJECT.
+     *
+     * Must be called from a coroutine. Returns true if the sender accepted the
+     * resume and streaming has begun, false otherwise.
+     */
+    suspend fun requestResume(record: InterruptedTransferStore.InterruptedRecord): Boolean =
+        withContext(Dispatchers.IO) {
+            val sess = session ?: run {
+                Log.e(TAG, "Cannot resume: no active session")
+                return@withContext false
+            }
+            val out = activeOutput ?: run {
+                Log.e(TAG, "Cannot resume: no output stream")
+                return@withContext false
+            }
+            if (sess.state != FerrySession.State.ESTABLISHED) {
+                Log.e(TAG, "Cannot resume: session not ESTABLISHED")
+                return@withContext false
+            }
+
+            // Rebuild the TransferMetadata from the stored JSON.
+            val meta = try {
+                TransferMetadata.fromJson(org.json.JSONObject(record.originalMetadataJson))
+            } catch (e: Exception) {
+                Log.e(TAG, "Cannot parse metadata for interrupted transfer ${record.transferId.take(8)}: ${e.message}")
+                return@withContext false
+            }
+
+            // Check that the .part file still exists.
+            val partFile = java.io.File(stagingDir, "${record.transferId}.part")
+            if (!partFile.exists()) {
+                Log.e(TAG, "Cannot resume: .part file missing for ${record.transferId.take(8)}")
+                interruptedStore.delete(record.transferId)
+                _interruptedTransfers.value = interruptedStore.listForSender(connectedPeerStaticB64 ?: "")
+                return@withContext false
+            }
+
+            // Compute partial_sha256 from the .part file.
+            val partialSha256 = computePrefixSha256(partFile)
+            if (partialSha256 == null) {
+                Log.e(TAG, "Cannot compute partial_sha256 for ${record.transferId.take(8)}")
+                return@withContext false
+            }
+
+            // Reconstruct receiver in INTERRUPTED state so the TRANSFER_RESUME_ACCEPT
+            // handler can call receiver.resume(chunkIndex) on it.
+            // begin() calls createNewFile() which is idempotent (false if .part already exists).
+            val newReceiver = FerryTransferReceiver(meta, stagingDir)
+            try {
+                newReceiver.begin()   // IDLE -> TRANSFERRING (creates/preserves .part)
+            } catch (e: java.io.IOException) {
+                Log.w(TAG, "begin() in requestResume returned IO warning (ok if .part exists): ${e.message}")
+                // Non-fatal: .part already exists from previous session
+            }
+            newReceiver.interrupt()  // TRANSFERRING -> INTERRUPTED
+            activeReceiver = newReceiver
+            activeReceiverMeta = meta
+
+            // Set a deferred to wait for ACCEPT/REJECT from the message loop.
+            val deferred = CompletableDeferred<Boolean>()
+            pendingResumeAccept = deferred
+
+            // Send TRANSFER_RESUME_REQUEST.
+            try {
+                sendEncryptedMessage(sess, out,
+                    ProtocolConstants.MessageTypes.TRANSFER_RESUME_REQUEST,
+                    JSONObject().apply {
+                        put("transfer_id", record.transferId)
+                        put("resume_chunk_index", record.resumeChunkIndex)
+                        put("resume_offset_bytes", record.bytesReceived)
+                        put("partial_sha256", partialSha256)
+                        put("protocol_version", 1)
+                    }
+                )
+                Log.i(TAG, "TRANSFER_RESUME_REQUEST sent for ${record.transferId.take(8)} " +
+                    "(chunk=${record.resumeChunkIndex}, offset=${record.bytesReceived})")
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to send TRANSFER_RESUME_REQUEST: ${e.message}")
+                activeReceiver?.cancel()
+                activeReceiver = null
+                activeReceiverMeta = null
+                pendingResumeAccept = null
+                return@withContext false
+            }
+
+            // Wait up to 120 seconds.
+            return@withContext try {
+                kotlinx.coroutines.withTimeout(120_000L) { deferred.await() }
+            } catch (e: Exception) {
+                Log.w(TAG, "Timed out waiting for TRANSFER_RESUME_ACCEPT for ${record.transferId.take(8)}")
+                pendingResumeAccept = null
+                activeReceiver?.cancel()
+                activeReceiver = null
+                activeReceiverMeta = null
+                false
+            }
+        }
+
+    /**
+     * Phase 3E public API — Discard an interrupted transfer (no longer want to resume).
+     * Deletes the .part file and removes the record from InterruptedTransferStore.
+     */
+    fun discardInterrupted(transferId: String) {
+        val partFile = java.io.File(stagingDir, "$transferId.part")
+        if (partFile.exists()) {
+            partFile.delete()
+            Log.i(TAG, "Discarded .part file for interrupted transfer ${transferId.take(8)}")
+        }
+        interruptedStore.delete(transferId)
+        _interruptedTransfers.value = interruptedStore.listForSender(connectedPeerStaticB64 ?: "")
+    }
+
+    /**
+     * Phase 3E — Sender-side: handle an incoming TRANSFER_RESUME_REQUEST.
+     *
+     * Verifies the prefix hash, sends TRANSFER_RESUME_ACCEPT, and streams
+     * chunks from the resume offset. Called on a background coroutine from
+     * the message router to avoid blocking the receive loop.
+     */
+    private suspend fun onResumeRequest(
+        sess: FerrySession,
+        output: OutputStream,
+        transferId: String,
+        resumeChunkIndex: Int,
+        resumeOffsetBytes: Int,
+        partialSha256: String,
+    ) = withContext(Dispatchers.IO) {
+        fun reject(reason: String) {
+            try {
+                sendEncryptedMessage(sess, output,
+                    ProtocolConstants.MessageTypes.TRANSFER_RESUME_REJECT,
+                    JSONObject().apply {
+                        put("transfer_id", transferId)
+                        put("reason", reason)
+                    }
+                )
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to send TRANSFER_RESUME_REJECT: ${e.message}")
+            }
+        }
+
+        // We need the interrupted store record to locate the content URI.
+        val record = interruptedStore.get(transferId)
+        if (record == null || record.contentUriString == null) {
+            Log.w(TAG, "TRANSFER_RESUME_REQUEST for $transferId: no sender record / no content URI")
+            reject("TRANSFER_NOT_FOUND")
+            return@withContext
+        }
+
+        val contentUri = try {
+            android.net.Uri.parse(record.contentUriString)
+        } catch (e: Exception) {
+            Log.w(TAG, "Cannot parse content URI for ${transferId.take(8)}: ${e.message}")
+            reject("SOURCE_MODIFIED")
+            return@withContext
+        }
+
+        // Compute prefix SHA-256 from content URI.
+        val computedPrefix = try {
+            computePrefixSha256FromUri(contentUri, resumeOffsetBytes.toLong())
+        } catch (e: Exception) {
+            Log.w(TAG, "Cannot compute prefix SHA-256 for ${transferId.take(8)}: ${e.message}")
+            reject("SOURCE_MODIFIED")
+            return@withContext
+        }
+
+        if (computedPrefix == null || computedPrefix != partialSha256) {
+            Log.w(TAG, "Prefix hash mismatch for ${transferId.take(8)}")
+            reject("PARTIAL_CORRUPT")
+            return@withContext
+        }
+
+        // Send ACCEPT.
+        try {
+            sendEncryptedMessage(sess, output,
+                ProtocolConstants.MessageTypes.TRANSFER_RESUME_ACCEPT,
+                JSONObject().apply {
+                    put("transfer_id", transferId)
+                    put("resume_chunk_index", resumeChunkIndex)
+                    put("protocol_version", 1)
+                }
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to send TRANSFER_RESUME_ACCEPT: ${e.message}")
+            return@withContext
+        }
+
+        // Stream chunks from the resume offset.
+        try {
+            val inputStream = context.contentResolver.openInputStream(contentUri)
+                ?: run {
+                    Log.e(TAG, "Cannot open content URI for resume of ${transferId.take(8)}")
+                    return@withContext
+                }
+            inputStream.use { fis ->
+                val skipped = fis.skip(resumeOffsetBytes.toLong())
+                if (skipped != resumeOffsetBytes.toLong()) {
+                    Log.w(TAG, "Could not skip $resumeOffsetBytes bytes for resume of ${transferId.take(8)}")
+                    return@withContext
+                }
+                val client = FerryTransferClient()
+                client.streamChunksFromStream(
+                    transferId = transferId,
+                    inputStream = fis,
+                    totalBytes = record.fileSize,
+                    startSeq = resumeChunkIndex,
+                    encryptAndWrite = { frame ->
+                        val encrypted = sess.encryptFrame(frame)
+                        output.write(encrypted)
+                        output.flush()
+                    },
+                    onProgress = { done, total ->
+                        _transferProgress.value = TransferProgress(
+                            transferId = transferId,
+                            fileName = record.fileName,
+                            bytesDone = resumeOffsetBytes + done,
+                            totalBytes = total,
+                            direction = TransferProgress.Direction.OUTGOING,
+                        )
+                    },
+                    cancelSignal = { outgoingCancelled.get() },
+                )
+            }
+            // Send TRANSFER_COMPLETE.
+            sendEncryptedMessage(sess, output,
+                ProtocolConstants.MessageTypes.TRANSFER_COMPLETE,
+                JSONObject().apply { put("transfer_id", transferId) }
+            )
+            Log.i(TAG, "Resumed transfer ${transferId.take(8)}: TRANSFER_COMPLETE sent")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error during resume streaming for ${transferId.take(8)}: ${e.message}")
+        } finally {
+            _transferProgress.value = null
+            interruptedStore.delete(transferId)
+            _interruptedTransfers.value = interruptedStore.listForSender(connectedPeerStaticB64 ?: "")
+        }
+    }
+
+    /**
+     * Compute SHA-256 of all bytes in [file].
+     * Used for receiver-side partial_sha256 in TRANSFER_RESUME_REQUEST.
+     */
+    private fun computePrefixSha256(file: java.io.File): String? = try {
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+        file.inputStream().use { fis ->
+            val buf = ByteArray(65536)
+            var n: Int
+            while (fis.read(buf).also { n = it } != -1) {
+                digest.update(buf, 0, n)
+            }
+        }
+        digest.digest().joinToString("") { "%02x".format(it) }
+    } catch (e: Exception) {
+        Log.w(TAG, "computePrefixSha256 failed: ${e.message}")
+        null
+    }
+
+    /**
+     * Compute SHA-256 of the first [lengthBytes] bytes of the content identified by [uri].
+     * Used for sender-side verification in TRANSFER_RESUME_REQUEST handling.
+     */
+    private fun computePrefixSha256FromUri(uri: android.net.Uri, lengthBytes: Long): String? {
+        return try {
+            val digest = java.security.MessageDigest.getInstance("SHA-256")
+            context.contentResolver.openInputStream(uri)?.use { fis ->
+                var remaining = lengthBytes
+                val buf = ByteArray(65536)
+                while (remaining > 0) {
+                    val toRead = minOf(buf.size.toLong(), remaining).toInt()
+                    val n = fis.read(buf, 0, toRead)
+                    if (n == -1) return null  // file shorter than expected
+                    digest.update(buf, 0, n)
+                    remaining -= n
+                }
+            } ?: return null
+            digest.digest().joinToString("") { "%02x".format(it) }
+        } catch (e: Exception) {
+            Log.w(TAG, "computePrefixSha256FromUri failed: ${e.message}")
+            null
+        }
     }
 
     private fun sendEncryptedMessage(sess: FerrySession, output: OutputStream, type: String, payload: JSONObject) {
@@ -797,6 +1222,7 @@ class FerryControlClient(
         Log.i(TAG, "Transfer accepted — streaming chunks")
         val client = FerryTransferClient()
         var streamSuccess = false
+        var bytesSent = 0L
         try {
             val (ok, _) = client.streamChunksFromStream(
                 transferId = transferId,
@@ -808,6 +1234,7 @@ class FerryControlClient(
                     out.flush()
                 },
                 onProgress = { done, total ->
+                    bytesSent = done
                     _transferProgress.value = TransferProgress(
                         transferId = transferId,
                         fileName = fileName,
@@ -829,7 +1256,34 @@ class FerryControlClient(
                 JSONObject().apply { put("transfer_id", transferId) })
         } else {
             Log.w(TAG, "Streaming cancelled or failed")
-            if (!outgoingCancelledByPeer.get()) {
+            if (!outgoingCancelled.get() && !outgoingCancelledByPeer.get() && bytesSent > 0) {
+                // Connection dropped midway. Save for resume.
+                val peerKey = connectedPeerStaticB64 ?: ""
+                if (peerKey.isNotBlank()) {
+                    Log.i(TAG, "Saving interrupted outgoing transfer $transferId at $bytesSent bytes")
+                    val nowMs = System.currentTimeMillis()
+                    val record = InterruptedTransferStore.InterruptedRecord(
+                        transferId = transferId,
+                        fileName = fileName,
+                        fileSize = fileSize,
+                        mimeType = mimeType,
+                        sha256 = sha256,
+                        chunkSize = FerryTransferClient.CHUNK_SIZE,
+                        chunkCount = chunkCount,
+                        senderIdentity = identity.publicKeyB64,
+                        receiverIdentity = peerKey,
+                        originalMetadataJson = payload.toString(),
+                        bytesReceived = bytesSent,
+                        resumeChunkIndex = (bytesSent / FerryTransferClient.CHUNK_SIZE).toInt(),
+                        partialSha256 = "",
+                        interruptedAt = nowMs,
+                        expireAt = InterruptedTransferStore.makeExpireAt(nowMs),
+                        direction = InterruptedTransferStore.InterruptedRecord.Direction.OUTGOING,
+                        contentUriString = uri.toString(),
+                    )
+                    interruptedStore.save(record)
+                }
+            } else if (!outgoingCancelledByPeer.get()) {
                 sendEncryptedMessage(sess, out, ProtocolConstants.MessageTypes.TRANSFER_CANCEL,
                     JSONObject().apply { put("transfer_id", transferId); put("reason", "USER_CANCELLED") })
             }

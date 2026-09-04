@@ -260,6 +260,80 @@ Fatal error, either side may send at any time during a transfer.
 
 ---
 
+### 3.4. Resumable Transfer Protocol (Phase 3E Task 2)
+
+Resume negotiation occurs exclusively inside an already-`ESTABLISHED` (Ed25519-authenticated) Ferry session.
+
+#### `TRANSFER_RESUME_REQUEST` (receiver → sender)
+
+Sent by the receiver to negotiate resumption of an `INTERRUPTED` transfer. The partial hash is recomputed from the disk-resident `.part` file.
+
+```json
+{
+  "type": "TRANSFER_RESUME_REQUEST",
+  "payload": {
+    "transfer_id": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+    "resume_offset_bytes": 7340032,
+    "resume_chunk_index": 112,
+    "partial_sha256": "4b5d6e7f...64hex_lowercase",
+    "protocol_version": 1
+  }
+}
+```
+
+Validation constraints:
+* `transfer_id`: Valid UUID string.
+* `resume_offset_bytes`: Non-negative integer, <= 10 GiB limit.
+* `resume_chunk_index`: Non-negative integer.
+* `partial_sha256`: Exactly 64 lowercase hexadecimal characters (`[0-9a-f]{64}`).
+* `protocol_version`: Must equal `1`.
+* Consistency: `resume_offset_bytes == resume_chunk_index * chunk_size` (where `chunk_size = 65536`). If `resume_chunk_index == 0`, `resume_offset_bytes` must be `0`.
+
+#### `TRANSFER_RESUME_ACCEPT` (sender → receiver)
+
+Sent by the sender when source prefix validation succeeds, confirming that chunk streaming will begin at `resume_chunk_index`.
+
+```json
+{
+  "type": "TRANSFER_RESUME_ACCEPT",
+  "payload": {
+    "transfer_id": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+    "resume_chunk_index": 112,
+    "protocol_version": 1
+  }
+}
+```
+
+Validation constraints:
+* `transfer_id`: Valid UUID string.
+* `resume_chunk_index`: Non-negative integer.
+* `protocol_version`: Must equal `1`.
+
+#### `TRANSFER_RESUME_REJECT` (sender → receiver)
+
+Sent by the sender when resume cannot be accepted. The receiver must clean up the partial file and transition to `FAILED`.
+
+```json
+{
+  "type": "TRANSFER_RESUME_REJECT",
+  "payload": {
+    "transfer_id": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+    "reason": "SOURCE_MODIFIED"
+  }
+}
+```
+
+Explicit allowed reasons:
+* `SOURCE_MODIFIED`: Source file size, mtime, or prefix hash does not match stored metadata.
+* `TRANSFER_NOT_FOUND`: Sender has no record or source path for this transfer.
+* `PARTIAL_CORRUPT`: Receiver's partial prefix hash does not match source prefix.
+* `WRONG_PEER`: `sender_identity` does not match the session's authenticated peer key.
+* `STALE`: Transfer has exceeded retention TTL.
+* `PEER_CANCELLED`: Transfer was cancelled by peer or user.
+
+
+---
+
 ## 4. Transfer State Machine
 
 ```
@@ -334,3 +408,61 @@ All timeouts are enforced at the application layer:
 - Outgoing: transfer cancelled, waiting events unblocked.
 
 
+
+---
+
+## 8. Resumable Transfer Protocol (Phase 3E Design — Not Yet Implemented)
+
+See `docs/PHASE_3E_DESIGN.md` for the full specification.
+
+### New Message Types (planned)
+
+#### `TRANSFER_RESUME_REQUEST` (receiver → sender)
+Sent after a fresh authenticated session is established, when the receiver has a persisted INTERRUPTED transfer.
+```json
+{
+  "type": "TRANSFER_RESUME_REQUEST",
+  "payload": {
+    "transfer_id": "<original-uuid>",
+    "resume_offset_bytes": 7340032,
+    "resume_chunk_index": 112,
+    "partial_sha256": "<64-hex SHA-256 of .part file>",
+    "protocol_version": 1
+  }
+}
+```
+
+#### `TRANSFER_RESUME_ACCEPT` (sender → receiver)
+```json
+{
+  "type": "TRANSFER_RESUME_ACCEPT",
+  "payload": {
+    "transfer_id": "<original-uuid>",
+    "resume_chunk_index": 112,
+    "protocol_version": 1
+  }
+}
+```
+
+#### `TRANSFER_RESUME_REJECT` (sender → receiver)
+```json
+{
+  "type": "TRANSFER_RESUME_REJECT",
+  "payload": {
+    "transfer_id": "<original-uuid>",
+    "reason": "SOURCE_MODIFIED"
+  }
+}
+```
+Reason codes: `SOURCE_MODIFIED`, `TRANSFER_NOT_FOUND`, `PARTIAL_CORRUPT`, `WRONG_PEER`, `STALE`, `PEER_CANCELLED`.
+
+### New Transfer States (planned)
+- `INTERRUPTED`: Transfer paused mid-stream; `.part` file retained; resumable.
+- `RESUME_REQUESTED`: Receiver sent `TRANSFER_RESUME_REQUEST`; awaiting sender.
+- `RESUMING`: Resume accepted; chunks flowing from `resume_chunk_index`.
+
+### AEAD / Nonce Safety
+Resumed chunks flow over a **new authenticated session with fresh ephemeral keys**. Old session keys are never reused. The FYCH `seq` field starts at `resume_chunk_index` for resumed streams. The AEAD nonce counter always starts at 0 for each new session.
+
+### Backward Compatibility
+New message types are ignored by old peers (response: `ERR_UNKNOWN_MESSAGE`). Peers signal resume capability via an optional `capabilities: ["resume"]` field in `HANDSHAKE_INIT`/`HANDSHAKE_RESPONSE`.

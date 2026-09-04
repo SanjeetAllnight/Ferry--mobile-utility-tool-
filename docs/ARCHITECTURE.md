@@ -106,7 +106,8 @@ CONTROL PLANE                                DATA PLANE
   * Segmented binary streaming (standard 64 KiB or 128 KiB chunks).
   * Inline chunk sequencing and flow control.
   * Streaming SHA-256 calculation for end-to-end payload verification.
-  * Direct disk staging via temporary files (`<filename>.<transfer_id>.part`).
+  * Direct disk staging via temporary files (`<transfer_id>.part`).
+  * **Resumable transfers (Phase 3E design)**: Interrupted transfers transition to `INTERRUPTED` state; `.part` file is retained with a 7-day TTL. On reconnect, receiver sends `TRANSFER_RESUME_REQUEST` with prefix SHA-256; sender verifies against source before streaming from the resume offset. See `docs/PHASE_3E_DESIGN.md`.
 
 ---
 

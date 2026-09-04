@@ -546,12 +546,29 @@ class FerryMainWindow(Adw.ApplicationWindow):
             )
 
             status_label = Gtk.Label(
-                label="✓" if rec.status == "COMPLETED" else "✗"
+                label="✓" if rec.status == "COMPLETED" else "✗" if rec.status in ("FAILED", "CANCELLED") else "⏸"
             )
             status_label.add_css_class(
-                "success" if rec.status == "COMPLETED" else "error"
+                "success" if rec.status == "COMPLETED" else "error" if rec.status in ("FAILED", "CANCELLED") else "warning"
             )
             row.add_suffix(status_label)
+            
+            if rec.status == "INTERRUPTED" and rec.direction == "INCOMING":
+                resume_btn = Gtk.Button(label="Resume")
+                resume_btn.add_css_class("suggested-action")
+                resume_btn.set_valign(Gtk.Align.CENTER)
+                def _on_resume_clicked(_btn, tid=rec.transfer_id):
+                    established = list(app.service.established_sessions.keys())
+                    if not established:
+                        self._show_error_toast("No active connection to peer to resume")
+                        return
+                    remote_addr = established[0]
+                    asyncio.run_coroutine_threadsafe(
+                        app.service.request_resume(remote_addr, tid),
+                        app.get_loop()
+                    )
+                resume_btn.connect("clicked", _on_resume_clicked)
+                row.add_suffix(resume_btn)
 
             self.history_group.add(row)
             self._history_rows.append(row)

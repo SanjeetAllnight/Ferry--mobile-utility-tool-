@@ -231,8 +231,10 @@ class FerryService:
             self._last_chunk_time.pop(transfer_id, None)
             incoming.cancel()
             device_id = ps.remote_device_id or ps.remote_addr
+            
+            final_status = "INTERRUPTED" if incoming.state == TransferState.INTERRUPTED else "FAILED"
             logger.info(
-                "Incoming transfer %s FAILED due to peer disconnect", transfer_id[:8]
+                "Incoming transfer %s %s due to peer disconnect", transfer_id[:8], final_status
             )
             self._record_transfer_once(
                 transfer_id=transfer_id,
@@ -240,7 +242,7 @@ class FerryService:
                 file_name=incoming.meta.file_name,
                 file_size=incoming.meta.file_size,
                 direction="INCOMING",
-                status="FAILED",
+                status=final_status,
                 started_at=incoming.meta.created_at,
                 sha256="",
             )
@@ -565,16 +567,27 @@ class FerryService:
         download_dir = Path(self.config.download_dir)
         download_dir.mkdir(parents=True, exist_ok=True)
 
-        # Phase 3D: Clean up stale .part files from previous crashed sessions
+        # Phase 3D/3E: Clean up stale .part files from previous crashed sessions,
+        # but protect those that belong to a valid INTERRUPTED transfer in the DB.
+        import time
         staging_dir = download_dir / "staging"
         if staging_dir.exists():
             stale = list(staging_dir.glob("*.part"))
             for stale_file in stale:
                 try:
-                    stale_file.unlink()
-                    logger.info("Removed stale staging file: %s", stale_file.name)
+                    tid = stale_file.stem
+                    is_protected = False
+                    info = self.db.get_interrupted_transfer(tid)
+                    if info and info.expire_at > int(time.time() * 1000):
+                        is_protected = True
+
+                    if not is_protected:
+                        stale_file.unlink()
+                        logger.info("Removed stale staging file: %s", stale_file.name)
+                    else:
+                        logger.info("Preserved interrupted staging file: %s", stale_file.name)
                 except Exception as exc:
-                    logger.warning("Could not remove stale file %s: %s", stale_file.name, exc)
+                    logger.warning("Could not process staging file %s: %s", stale_file.name, exc)
 
         # Start mDNS discovery
         await self.discovery.start()
@@ -591,6 +604,11 @@ class FerryService:
             self.config.device_name,
             self.identity.public_key_b64[:12],
         )
+
+        # Start chunk stall monitor
+        stall_task = asyncio.create_task(self._monitor_stall_timeouts())
+        self._active_tasks.add(stall_task)
+        stall_task.add_done_callback(self._active_tasks.discard)
 
     async def stop(self) -> None:
         """Gracefully stop the service."""
@@ -1075,6 +1093,70 @@ class FerryService:
             holder.append(value)
             event.set()
 
+    async def request_resume(self, remote_addr: str, transfer_id: str) -> bool:
+        """Receiver initiates a resume for an interrupted transfer."""
+        ps = self._active_sessions.get(remote_addr)
+        if not ps:
+            logger.error("Cannot resume %s: peer %s not connected", transfer_id[:8], remote_addr)
+            return False
+            
+        info = self.db.get_interrupted_transfer(transfer_id)
+        if not info:
+            logger.error("Cannot resume %s: no interrupted record found", transfer_id[:8])
+            return False
+            
+        # Re-create IncomingTransfer
+        import json as _json
+        try:
+            meta = TransferMetadata.from_dict(_json.loads(info.original_metadata_json))
+        except Exception as exc:
+            logger.error("Failed to parse original metadata: %s", exc)
+            return False
+            
+        staging_dir = Path(self.config.download_dir) / "staging"
+        incoming = IncomingTransfer(meta=meta, download_dir=Path(self.config.download_dir))
+        # Hard override bytes_received and chunks
+        incoming.bytes_received = info.bytes_received
+        incoming._resume_chunk_index = info.resume_chunk_index
+        incoming.state = TransferState.RESUMING
+        
+        # We need a new part file path? No, incoming transfer generates it from transfer_id
+        # We must open the part file in append mode. `receive_chunk` will handle it.
+        self._incoming_transfers[transfer_id] = incoming
+        self._incoming_peers[transfer_id] = ps
+        
+        payload = {
+            "transfer_id": transfer_id,
+            "resume_offset_bytes": info.bytes_received,
+            "resume_chunk_index": info.resume_chunk_index,
+            "partial_sha256": info.partial_sha256,
+        }
+        await self.send_encrypted(ps, MessageType.TRANSFER_RESUME_REQUEST, payload)
+        
+        logger.info("TRANSFER_RESUME_REQUEST sent for %s", transfer_id[:8])
+        
+        # Wait for accept or reject
+        response = await asyncio.wait_for(
+            self._wait_for_transfer_response(ps, transfer_id),
+            timeout=30.0,
+        )
+        
+        if response != "ACCEPT":
+            logger.warning("Resume for %s was rejected", transfer_id[:8])
+            self._incoming_transfers.pop(transfer_id, None)
+            self._incoming_peers.pop(transfer_id, None)
+            return False
+            
+        logger.info("Resume for %s accepted. Waiting for chunks.", transfer_id[:8])
+        return True
+
+    async def _on_transfer_resume_request(self, ps: "PeerSession", payload: dict) -> None:
+        """Receiver side: handle an incoming TRANSFER_REQUEST."""
+        try:
+            meta = TransferMetadata.from_dict(payload)
+        except (ValueError, KeyError) as exc:
+            logger.error("Invalid TRANSFER_REQUEST from %s: %s", ps.remote_addr, exc)
+
     async def _on_transfer_request(self, ps: "PeerSession", payload: dict) -> None:
         """Receiver side: handle an incoming TRANSFER_REQUEST."""
         try:
@@ -1293,6 +1375,27 @@ class FerryService:
         (ct_len,) = struct.unpack("!I", header)
         rest = await reader.readexactly(AEAD_NONCE_SIZE + ct_len)
         return header + rest
+
+    async def _monitor_stall_timeouts(self) -> None:
+        """Background task to detect stalled incoming transfers."""
+        import time
+        while self._is_running:
+            await asyncio.sleep(5.0)
+            now = time.monotonic()
+            stalled_transfers = []
+            for tid, last_t in list(self._last_chunk_time.items()):
+                if now - last_t > 30.0:  # 30 seconds stall timeout
+                    stalled_transfers.append(tid)
+            
+            for tid in stalled_transfers:
+                logger.warning("Transfer %s stalled for over 30s. Disconnecting session.", tid[:8])
+                # Find the session to disconnect it, which will cleanly interrupt the transfer
+                ps = self._incoming_peers.get(tid)
+                if ps:
+                    try:
+                        ps.writer.close()
+                    except Exception:
+                        pass
 
     async def send_encrypted(self, ps: PeerSession, msg_type: MessageType, payload: dict) -> None:
         """Send an encrypted Ferry envelope to an established or pairing session peer."""

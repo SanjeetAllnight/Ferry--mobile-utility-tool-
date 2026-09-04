@@ -146,16 +146,17 @@ class FerryTransferClient {
         transferId: String,
         inputStream: InputStream,
         totalBytes: Long,
+        startSeq: Int = 0,              // Phase 3E: resume from this chunk sequence number
         encryptAndWrite: suspend (ByteArray) -> Unit,
         onProgress: ((Long, Long) -> Unit)? = null,
         cancelSignal: () -> Boolean = { false },
     ): Pair<Boolean, String> = withContext(Dispatchers.IO) {
         val digest = MessageDigest.getInstance("SHA-256")
         val buffer = ByteArray(CHUNK_SIZE)
-        var seq = 0
+        var seq = startSeq
         var bytesSent = 0L
 
-        Log.i(TAG, "Streaming transfer $transferId from InputStream: $totalBytes bytes expected")
+        Log.i(TAG, "Streaming transfer $transferId from InputStream: $totalBytes bytes expected (startSeq=$startSeq)")
 
         while (true) {
             if (cancelSignal()) {
@@ -178,7 +179,7 @@ class FerryTransferClient {
         }
 
         val sha256 = digest.digest().joinToString("") { "%02x".format(it) }
-        Log.i(TAG, "Transfer $transferId: $seq chunks sent, sha256=$sha256")
+        Log.i(TAG, "Transfer $transferId: ${seq - startSeq} chunks sent (seq $startSeq..$seq), sha256=$sha256")
         Pair(true, sha256)
     }
 }

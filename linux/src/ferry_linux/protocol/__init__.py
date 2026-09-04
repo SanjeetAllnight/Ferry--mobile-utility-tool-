@@ -15,6 +15,10 @@ from .models import (
     TransferCompletePayload,
     TransferResultPayload,
     TransferErrorPayload,
+    ResumeRejectReason,
+    TransferResumeRequestPayload,
+    TransferResumeAcceptPayload,
+    TransferResumeRejectPayload,
     decode_frame,
     encode_frame,
 )
@@ -32,6 +36,10 @@ __all__ = [
     "TransferCompletePayload",
     "TransferResultPayload",
     "TransferErrorPayload",
+    "ResumeRejectReason",
+    "TransferResumeRequestPayload",
+    "TransferResumeAcceptPayload",
+    "TransferResumeRejectPayload",
     "decode_frame",
     "encode_frame",
 ]

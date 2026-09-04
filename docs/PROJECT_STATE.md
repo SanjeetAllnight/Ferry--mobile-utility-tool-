@@ -5,7 +5,7 @@ This document is the primary persistent context file for **Ferry**. It reflects 
 ---
 
 ### Current Phase: Phase 3 (File Transfer Execution)
-**Status:** In Progress — Phase 3D Complete (Transfer Reliability & Error Recovery)
+**Status:** Phase 3E Complete
 **Goal:** Implement file transfer capabilities between paired devices.
 
 ### Phase 3 Progress Tracking:
@@ -14,6 +14,11 @@ This document is the primary persistent context file for **Ferry**. It reflects 
 - **Phase 3C / 3C.1 (Sender & Receiver UI / File Picking & Physical QA)**: Complete / Fully Verified. Full bidirectional user-facing file transfer experience physically verified on real Android device and Arch Linux desktop. Linux `Gtk.FileDialog` and Android SAF `GetContent` picker validated. Bidirectional streaming (up to 16.5 MB at ~11.8 MB/s), SHA-256 integrity verification, live UI progress, incoming transfer approval, and transfer history panels verified.
 - **Phase 3C.2 (Final Acceptance-Gate Verification & Discrepancy Resolution)**: Complete / Fully Verified. Resolved both remaining acceptance gate discrepancies: (1) native zero-byte (0-byte) file transfer support with SHA-256 `e3b0c442...` integrity verification, and (2) user-facing in-flight transfer cancellation UI buttons on GTK4 and Jetpack Compose with wire `TRANSFER_CANCEL` transmission, immediate `.part` cleanup, and `CANCELLED` history recording. 149/149 Linux unit tests and 52/52 Android unit tests passing (201 total). Phase 3C is officially CLOSED.
 - **Phase 3D (Transfer Reliability & Error Recovery)**: Complete / Verified. Hardened the transfer system against all real-world failure modes: network disconnects mid-transfer, disk-full during writes, source-file disappearance during streaming, duplicate control messages, stale `.part` files from prior crashes, and acceptance timeouts. Session-disconnect cleanup now cancels in-flight transfers, records FAILED history, and clears UI rows. Added `TransferError` exception, `_record_transfer_once` idempotency guard, 120s acceptance timeout, and `_cancel_incoming_transfer_for_peer` / `_cancel_outgoing_transfer_for_peer` peer-cleanup helpers. 161/161 Linux tests and 57/57 Android tests passing (218 total). APK build successful. Phase 3D is CLOSED.
+- **Phase 3D.1 (Physical Reliability Acceptance)**: All three physical tests (PT-1 disconnect, PT-2 cancel, PT-3 recovery) passed on real hardware. Phase 3D is **FULLY VERIFIED**.
+- **Phase 3E (Resumable Transfer Architecture Design)**: Architecture design complete. See `docs/PHASE_3E_DESIGN.md`.
+- **Phase 3E Task 1 (Persistent Interrupted Transfer Foundation)**: Complete. Linux DB schema migrated to version 3 (7 new resume columns). `INTERRUPTED` state added to `TransferState` with `TRANSFERRING→INTERRUPTED` transition. `IncomingTransfer.interrupt()` and `interrupt_info()` implemented. `InterruptedTransferInfo` dataclass and 4 new `DatabaseManager` methods added (`save_interrupted_transfer`, `get_interrupted_transfer`, `list_interrupted_transfers_for_peer`, `expire_interrupted_transfers`). 22 new unit tests. 183/183 Linux tests passing.
+- **Phase 3E Task 2 (Resume Negotiation Protocol)**: Complete. Wire protocol models implemented for `TRANSFER_RESUME_REQUEST`, `TRANSFER_RESUME_ACCEPT`, `TRANSFER_RESUME_REJECT` with strict validation (UUID format, non-negative bounds, 64-char lowercase hex SHA-256, chunk alignment consistency, and explicit `ResumeRejectReason` enum). Implemented `IncomingTransfer.prepare_resume_request()` reading actual `.part` size from disk, verifying chunk boundaries, and streaming SHA-256 from disk without loading full file into memory. Added minimal service layer dispatch in `service.py`. 21 new unit tests (11 protocol model tests + 10 transfer tests).
+- **Phase 3E Task 3 (Resume Execution & UI)**: Complete and **Fully Verified**. Wired up state machine transitions for `RESUME_REQUESTED` and `RESUMING`. Sender side prefix-hash computation and chunk stream skipping implemented. UI actions wired for Linux and Android. Fixed critical bugs where `service.py` `start()` unconditionally deleted `.part` files, Android sender lacked persistence for `OUTGOING` interrupted transfers, and Linux UI/Receiver logic was missing. All components verified physically on real hardware (Android -> Linux physical interrupt and successful resume). **Phase 3E is CLOSED.**
 
 ### Previous Phase: Phase 2C (Interactive Trust & Identity Storage)
 **Status:** Complete / Verified
@@ -71,6 +76,24 @@ This document is the primary persistent context file for **Ferry**. It reflects 
   - **PT-1** (Disconnect mid-transfer) validated on real hardware: `FAILED` state reached, `.part` purged.
   - **PT-2** (User cancellation) validated on real hardware: `CANCELLED` state reached, `.part` purged.
   - **PT-3** (Recovery/Retry) validated on real hardware: New transfer ID generated, completed successfully with exact 55 MiB file size and matching SHA-256 hash.
+* [x] **Persistent Interrupted Transfer Foundation (Phase 3E Task 1)**:
+  - SQLite schema migration to v3 with 7 new resume columns.
+  - `INTERRUPTED` state in `TransferState` machine.
+  - `IncomingTransfer.interrupt()` safe file handle closure and `.part` file retention.
+  - `InterruptedTransferInfo` and database persistence helpers.
+* [x] **Resumable Transfer Protocol (Phase 3E Task 2)**:
+  - Wire protocol models: `TRANSFER_RESUME_REQUEST`, `TRANSFER_RESUME_ACCEPT`, `TRANSFER_RESUME_REJECT`.
+  - Comprehensive payload validation: UUIDs, bounds, 64-char lowercase hex SHA-256, chunk alignment.
+  - `IncomingTransfer.prepare_resume_request()`: disk-authoritative sizing, boundary validation, streaming SHA-256 computation.
+  - Minimal service-layer message dispatch recognizing resume control frames.
+* [x] **Resume Execution & UI (Phase 3E Task 3)**:
+  - Wired `RESUME_REQUESTED` and `RESUMING` state transitions.
+  - Sender-side source file verification (`st_mtime`/`st_size` check on Linux, length check on Android).
+  - Sender-side streaming partial prefix SHA-256 hashing.
+  - Chunk frame seq-number resuming and stream skipping.
+  - Android `InterruptedTransferStore` SharedPreferences backing.
+  - Interactive "Resume" and "Discard" UI buttons implemented natively on both GTK4 and Compose.
+  - **219/219 Linux tests passing; Android tests passing.**
 
 ---
 
@@ -90,7 +113,7 @@ This document is the primary persistent context file for **Ferry**. It reflects 
 
 ### Linux
 ```bash
-# Run all unit and integration tests (161 tests)
+# Run all unit and integration tests (204 tests)
 PYTHONPATH=linux/src python3 -m unittest discover -s linux/tests -v
 
 # Run desktop UI with discovery active
@@ -121,10 +144,10 @@ adb shell am start -n dev.ferry.app/.MainActivity
 
 * **Single Transfer at a Time**: Current architecture handles one active transfer at a time per peer session.
 * **No Chunk Stall Enforcement**: `TRANSFER_CHUNK_TIMEOUT_SECS = 120.0` is defined; last-chunk-time tracking is in place, but active per-transfer stall enforcement (a periodic asyncio task) is not yet implemented. The existing 300s session idle timeout remains the backstop.
-* **No Resumable Transfers**: A failed transfer_id is terminal. Users restart with a new transfer.
+* **Resume Execution Not Yet Implemented (Task 3)**: Resume message parsing, protocol validation, and receiver-side preparation are complete in Task 2. Full resume execution (disconnect-to-interrupt service wiring, sender prefix verification, chunk streaming from offset, and state machine transition to RESUMING) is scheduled for Task 3.
 
 ---
 
 ## 7. Next Recommended Task
 
-* **Phase 3E (Clipboard Sync / Notification Relay)** or next planned milestone per the roadmap.
+* **Phase 3F / Phase 4 Planning**: Phase 3 is now considered functionally complete and physically verified on all axes (discovery, pairing, zero-byte files, cancellation, and resilient resume). Next recommended actions include either proposing Phase 4 (e.g. Directory/Folder Transfers, Multi-file transfers, Clipboard sync) or a release stabilization phase.

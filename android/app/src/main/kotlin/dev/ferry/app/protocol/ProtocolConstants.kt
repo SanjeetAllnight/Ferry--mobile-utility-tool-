@@ -35,6 +35,11 @@ object ProtocolConstants {
         const val TRANSFER_COMPLETE = "TRANSFER_COMPLETE"  // sender → receiver: all chunks sent
         const val TRANSFER_RESULT = "TRANSFER_RESULT"      // receiver → sender: integrity verdict
         const val TRANSFER_ERROR = "TRANSFER_ERROR"
+
+        // Phase 3E: resumable transfers
+        const val TRANSFER_RESUME_REQUEST = "TRANSFER_RESUME_REQUEST"
+        const val TRANSFER_RESUME_ACCEPT  = "TRANSFER_RESUME_ACCEPT"
+        const val TRANSFER_RESUME_REJECT  = "TRANSFER_RESUME_REJECT"
     }
 
     object ErrorCodes {

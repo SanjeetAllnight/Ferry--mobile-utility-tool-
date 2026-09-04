@@ -3,11 +3,16 @@ package dev.ferry.app.transfer
 import java.util.UUID
 
 /**
- * Transfer state machine for Ferry Phase 3A.
+ * Transfer state machine for Ferry Phase 3A / Phase 3E.
  *
  * Both the sender (FerryTransferClient) and receiver (FerryTransferReceiver)
  * use this enum to track their local state.  The service layer manages the
  * correlated control-plane message exchange (TRANSFER_REQUEST/ACCEPT/etc.).
+ *
+ * Phase 3E additions:
+ * - INTERRUPTED: network disconnect mid-transfer; .part file retained on disk.
+ * - RESUME_REQUESTED: receiver sent TRANSFER_RESUME_REQUEST; awaiting sender decision.
+ * - RESUMING: resume accepted; chunks flowing from resume_chunk_index.
  */
 enum class TransferState {
     IDLE,
@@ -17,7 +22,10 @@ enum class TransferState {
     CANCELLING,     // TRANSFER_CANCEL sent; draining
     COMPLETED,      // SHA-256 verified and file finalised
     FAILED,         // Error (IO, integrity, protocol)
-    CANCELLED;      // Cancelled by either side
+    CANCELLED,      // Cancelled by either side
+    INTERRUPTED,    // Phase 3E: network disconnect mid-transfer; .part retained
+    RESUME_REQUESTED, // Phase 3E: receiver sent RESUME_REQUEST; awaiting sender
+    RESUMING;       // Phase 3E: resume accepted; chunks flowing from offset
 }
 
 /**

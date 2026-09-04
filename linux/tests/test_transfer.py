@@ -33,8 +33,10 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
+import sqlite3
 import struct
 import tempfile
+import time
 import unittest
 import uuid
 from pathlib import Path
@@ -941,6 +943,1049 @@ class TestPhase3DReliability(unittest.IsolatedAsyncioTestCase):
             with patch.object(svc.discovery, "stop", new=AsyncMock()):
                 await svc.stop()
 
+
+
+# ── Phase 3E Task 1: INTERRUPTED state, interrupt(), and DB migration ────────
+
+class TestPhase3ETask1InterruptedTransfer(unittest.TestCase):
+    """
+    Phase 3E Task 1 tests.
+
+    Tests for:
+    - IncomingTransfer.interrupt() semantics
+    - .part file retention
+    - bytes_received and resume_chunk_index consistency
+    - idempotency
+    - separation from CANCELLED/FAILED/COMPLETED
+    - interrupt_info() snapshot
+    """
+
+    def setUp(self):
+        self.tmpdir = Path(tempfile.mkdtemp())
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _make_incoming_with_data(self, data: bytes) -> "IncomingTransfer":
+        """Helper: create an IncomingTransfer, begin it, write all data, return it."""
+        sha256 = hashlib.sha256(data).hexdigest()
+        meta = _make_meta(file_size=len(data), chunk_size=CHUNK_SIZE, sha256=sha256)
+        incoming = IncomingTransfer(meta=meta, download_dir=self.tmpdir)
+        incoming.begin()
+        # Write all chunks
+        offset = 0
+        seq = 0
+        while offset < len(data):
+            chunk = data[offset:offset + CHUNK_SIZE]
+            from ferry_linux.core.transfer import ChunkFrame
+            incoming.receive_chunk(ChunkFrame(meta.transfer_id, seq, chunk))
+            offset += len(chunk)
+            seq += 1
+        return incoming
+
+    # E01: interrupt() from TRANSFERRING → INTERRUPTED
+    def test_e01_interrupt_from_transferring(self):
+        """interrupt() from TRANSFERRING state transitions to INTERRUPTED."""
+        data = b"\xAA" * (CHUNK_SIZE * 2)
+        incoming = self._make_incoming_with_data(data)
+        self.assertEqual(incoming.state, TransferState.TRANSFERRING)
+
+        incoming.interrupt()
+
+        self.assertEqual(incoming.state, TransferState.INTERRUPTED)
+
+    # E02: .part file is retained after interrupt()
+    def test_e02_part_file_retained_after_interrupt(self):
+        """.part file must exist on disk after interrupt()."""
+        data = b"\xBB" * (CHUNK_SIZE + 100)
+        incoming = self._make_incoming_with_data(data)
+        part = incoming._temp_path
+        self.assertTrue(part.exists(), ".part file should exist before interrupt")
+
+        incoming.interrupt()
+
+        self.assertTrue(part.exists(), ".part file must be retained after interrupt()")
+
+    # E03: bytes_received matches actual bytes on disk
+    def test_e03_bytes_received_matches_disk(self):
+        """After interrupt(), bytes_received == actual .part file size on disk."""
+        data = b"\xCC" * (CHUNK_SIZE * 3)
+        incoming = self._make_incoming_with_data(data)
+        incoming.interrupt()
+
+        on_disk = incoming._temp_path.stat().st_size
+        self.assertEqual(incoming.bytes_received, on_disk)
+        self.assertEqual(incoming.bytes_received, len(data))
+
+    # E04: resume_chunk_index is correct (full chunks only)
+    def test_e04_resume_chunk_index_correct(self):
+        """For exact chunk-boundary data, resume_chunk_index == chunk_count."""
+        data = b"\xDD" * (CHUNK_SIZE * 2)   # Exactly 2 full chunks
+        incoming = self._make_incoming_with_data(data)
+        incoming.interrupt()
+
+        # _next_seq is reset from disk bytes // chunk_size
+        self.assertEqual(incoming._next_seq, 2)
+
+    # E05: file handle is closed after interrupt()
+    def test_e05_file_handle_closed_after_interrupt(self):
+        """After interrupt(), the internal file handle must be None (closed)."""
+        data = b"\xEE" * CHUNK_SIZE
+        incoming = self._make_incoming_with_data(data)
+        self.assertIsNotNone(incoming._temp_fh)
+
+        incoming.interrupt()
+
+        self.assertIsNone(incoming._temp_fh)
+
+    # E06: interrupt() is idempotent
+    def test_e06_interrupt_idempotent(self):
+        """Calling interrupt() twice does nothing on the second call."""
+        data = b"\xFF" * CHUNK_SIZE
+        incoming = self._make_incoming_with_data(data)
+
+        incoming.interrupt()
+        bytes_after_first = incoming.bytes_received
+        seq_after_first = incoming._next_seq
+        incoming.interrupt()  # second call — must not raise
+
+        self.assertEqual(incoming.state, TransferState.INTERRUPTED)
+        self.assertEqual(incoming.bytes_received, bytes_after_first)
+        self.assertEqual(incoming._next_seq, seq_after_first)
+
+    # E07: metadata available after interrupt()
+    def test_e07_metadata_still_available_after_interrupt(self):
+        """TransferMetadata is accessible after interrupt()."""
+        data = b"\x01" * CHUNK_SIZE
+        incoming = self._make_incoming_with_data(data)
+        incoming.interrupt()
+
+        self.assertIsNotNone(incoming.meta)
+        self.assertIsNotNone(incoming.meta.transfer_id)
+        self.assertIsNotNone(incoming.meta.sha256)
+
+    # E08: interrupt_info() returns correct snapshot
+    def test_e08_interrupt_info_snapshot(self):
+        """interrupt_info() returns a dict with all required keys after interrupt()."""
+        data = b"\x02" * CHUNK_SIZE
+        incoming = self._make_incoming_with_data(data)
+        incoming.interrupt()
+
+        info = incoming.interrupt_info()
+        self.assertIsNotNone(info)
+        self.assertIn("transfer_id", info)
+        self.assertIn("bytes_received", info)
+        self.assertIn("resume_chunk_index", info)
+        self.assertIn("partial_sha256", info)
+        self.assertIn("sender_identity", info)
+        self.assertIn("original_metadata_json", info)
+        self.assertEqual(info["bytes_received"], CHUNK_SIZE)
+        self.assertEqual(info["resume_chunk_index"], 1)
+
+    # E09: interrupt() on COMPLETED is a no-op (does not change state)
+    def test_e09_interrupt_after_completed_does_nothing(self):
+        """interrupt() on a COMPLETED transfer preserves COMPLETED state."""
+        data = b"\x03" * 64
+        sha256 = hashlib.sha256(data).hexdigest()
+        meta = _make_meta(file_size=len(data), chunk_size=CHUNK_SIZE, sha256=sha256)
+        incoming = IncomingTransfer(meta=meta, download_dir=self.tmpdir)
+        incoming.begin()
+        from ferry_linux.core.transfer import ChunkFrame
+        incoming.receive_chunk(ChunkFrame(meta.transfer_id, 0, data))
+        incoming.finalise()
+        self.assertEqual(incoming.state, TransferState.COMPLETED)
+
+        incoming.interrupt()  # must not raise
+
+        self.assertEqual(incoming.state, TransferState.COMPLETED)
+
+    # E10: interrupt() on FAILED is a no-op
+    def test_e10_interrupt_after_failed_does_not_resurrect(self):
+        """interrupt() on a FAILED transfer leaves state as FAILED."""
+        from ferry_linux.core.transfer import ChunkFrame
+        data = b"\x04" * 64
+        bad_sha = "b" * 64
+        meta = _make_meta(file_size=len(data), chunk_size=CHUNK_SIZE, sha256=bad_sha)
+        incoming = IncomingTransfer(meta=meta, download_dir=self.tmpdir)
+        incoming.begin()
+        incoming.receive_chunk(ChunkFrame(meta.transfer_id, 0, data))
+        incoming.finalise()  # SHA-256 mismatch → FAILED
+        self.assertEqual(incoming.state, TransferState.FAILED)
+
+        incoming.interrupt()  # must not change state
+
+        self.assertEqual(incoming.state, TransferState.FAILED)
+
+    # E11: interrupt() on CANCELLED is a no-op
+    def test_e11_interrupt_after_cancelled_does_not_resurrect(self):
+        """interrupt() on a CANCELLED transfer leaves state as CANCELLED."""
+        data = b"\x05" * CHUNK_SIZE
+        incoming = self._make_incoming_with_data(data)
+        incoming.cancel()
+        self.assertEqual(incoming.state, TransferState.CANCELLED)
+
+        incoming.interrupt()  # must not raise or change state
+
+        self.assertEqual(incoming.state, TransferState.CANCELLED)
+
+    # E12: interrupt_info() returns None when not INTERRUPTED
+    def test_e12_interrupt_info_none_when_not_interrupted(self):
+        """interrupt_info() must return None when state is not INTERRUPTED."""
+        data = b"\x06" * CHUNK_SIZE
+        incoming = self._make_incoming_with_data(data)
+        self.assertEqual(incoming.state, TransferState.TRANSFERRING)
+        self.assertIsNone(incoming.interrupt_info())
+
+    # E13: zero-byte interrupt() results in FAILED, not INTERRUPTED
+    def test_e13_zero_byte_transfer_not_resumable(self):
+        """A zero-byte transfer must not become INTERRUPTED — stays FAILED."""
+        sha256 = hashlib.sha256(b"").hexdigest()
+        meta = _make_meta(file_size=0, chunk_size=CHUNK_SIZE, sha256=sha256)
+        incoming = IncomingTransfer(meta=meta, download_dir=self.tmpdir)
+        # Zero-byte transfers do not call begin(); they go straight to finalise() via
+        # a service-level shortcut. Simulate ACCEPTED state by calling begin() and
+        # then immediately interrupting.
+        incoming.begin()  # opens temp file; transitions to TRANSFERRING
+
+        incoming.interrupt()
+
+        # Zero-byte must not produce INTERRUPTED
+        self.assertNotEqual(incoming.state, TransferState.INTERRUPTED)
+
+    # E14: INTERRUPTED is a valid transition from TRANSFERRING in state machine
+    def test_e14_transferring_to_interrupted_valid_transition(self):
+        """TRANSFERRING→INTERRUPTED is a valid state machine transition."""
+        result = _transfer_transition(TransferState.TRANSFERRING, TransferState.INTERRUPTED)
+        self.assertEqual(result, TransferState.INTERRUPTED)
+
+    # E15: INTERRUPTED now has valid outgoing transitions (Phase 3E Task 3)
+    def test_e15_interrupted_has_resume_transitions(self):
+        """INTERRUPTED -> RESUME_REQUESTED and INTERRUPTED -> FAILED are valid (Phase 3E Task 3)."""
+        allowed = TransferState.VALID_TRANSITIONS[TransferState.INTERRUPTED]
+        self.assertIn(TransferState.RESUME_REQUESTED, allowed)
+        self.assertIn(TransferState.FAILED, allowed)
+        # Must NOT go directly to COMPLETED or CANCELLED
+        self.assertNotIn(TransferState.COMPLETED, allowed)
+        self.assertNotIn(TransferState.CANCELLED, allowed)
+
+
+class TestPhase3ETask1DatabaseMigration(unittest.TestCase):
+    """
+    Phase 3E Task 1 database migration tests.
+
+    Tests for:
+    - Schema v2 → v3 migration adds new columns
+    - Existing transfer rows survive migration
+    - Migration is idempotent (running v3 on a v3 DB is safe)
+    - New columns have expected NULL defaults for old rows
+    - save_interrupted_transfer and get_interrupted_transfer round-trip
+    - expire_interrupted_transfers marks expired rows as FAILED
+    """
+
+    def setUp(self):
+        self.tmpdir = Path(tempfile.mkdtemp())
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _make_v2_db(self) -> Path:
+        """
+        Create a minimal schema-v2 database by hand so we can test migration
+        without constructing a DatabaseManager at v2 schema time.
+        """
+        db_path = self.tmpdir / "ferry_v2.db"
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute("""
+                CREATE TABLE schema_version (version INTEGER PRIMARY KEY)
+            """)
+            conn.execute("INSERT INTO schema_version (version) VALUES (2)")
+            conn.execute("""
+                CREATE TABLE trusted_devices (
+                    device_id TEXT PRIMARY KEY,
+                    device_name TEXT NOT NULL,
+                    public_key TEXT NOT NULL,
+                    identity_public_key_b64 TEXT NOT NULL DEFAULT '',
+                    paired_at INTEGER NOT NULL,
+                    last_seen INTEGER NOT NULL
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE transfer_history (
+                    transfer_id TEXT PRIMARY KEY,
+                    device_id TEXT NOT NULL,
+                    file_name TEXT NOT NULL,
+                    file_size INTEGER NOT NULL,
+                    direction TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    started_at INTEGER NOT NULL,
+                    completed_at INTEGER,
+                    sha256 TEXT NOT NULL
+                )
+            """)
+            conn.execute("""
+                INSERT INTO transfer_history
+                    (transfer_id, device_id, file_name, file_size, direction, status,
+                     started_at, completed_at, sha256)
+                VALUES ('old-xfer-001', 'dev-1', 'file.bin', 1024, 'INCOMING', 'COMPLETED',
+                        1000000, 1000100, 'aabbccdd' || ? )
+            """, ("00" * 28,))
+            conn.commit()
+        finally:
+            conn.close()
+        return db_path
+
+    def test_db01_v2_to_v3_migration_adds_columns(self):
+        """Schema v2 → v3 migration: all 7 new columns must exist after upgrade."""
+        from ferry_linux.core.db import DatabaseManager
+        db_path = self._make_v2_db()
+        # DatabaseManager constructor triggers migration
+        db = DatabaseManager(db_path)
+
+        conn = sqlite3.connect(db_path)
+        try:
+            cursor = conn.execute("PRAGMA table_info(transfer_history)")
+            columns = {row[1] for row in cursor.fetchall()}
+        finally:
+            conn.close()
+
+        expected_new_cols = {
+            "interrupted_at", "bytes_received", "resume_chunk_index",
+            "partial_sha256", "sender_identity", "original_metadata_json", "expire_at",
+        }
+        for col in expected_new_cols:
+            self.assertIn(col, columns, f"Expected column '{col}' missing after migration")
+
+    def test_db02_existing_rows_survive_migration(self):
+        """Existing transfer_history rows must be intact after schema v3 migration."""
+        from ferry_linux.core.db import DatabaseManager
+        db_path = self._make_v2_db()
+        db = DatabaseManager(db_path)
+
+        transfers = db.list_transfers()
+        self.assertEqual(len(transfers), 1)
+        self.assertEqual(transfers[0].transfer_id, "old-xfer-001")
+        self.assertEqual(transfers[0].status, "COMPLETED")
+
+    def test_db03_migration_idempotent(self):
+        """Running migration on an already-v3 database must not raise or duplicate data."""
+        from ferry_linux.core.db import DatabaseManager
+        db_path = self._make_v2_db()
+        # First migration
+        db1 = DatabaseManager(db_path)
+        # Second open: v3 → v3 must be safe
+        db2 = DatabaseManager(db_path)
+
+        conn = sqlite3.connect(db_path)
+        try:
+            row = conn.execute(
+                "SELECT version FROM schema_version ORDER BY version DESC LIMIT 1"
+            ).fetchone()
+            self.assertEqual(row[0], 3)
+        finally:
+            conn.close()
+
+    def test_db04_new_columns_null_for_old_rows(self):
+        """After migration, old rows must have NULL for all new resume columns."""
+        from ferry_linux.core.db import DatabaseManager
+        db_path = self._make_v2_db()
+        DatabaseManager(db_path)
+
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            row = conn.execute(
+                "SELECT * FROM transfer_history WHERE transfer_id = 'old-xfer-001'"
+            ).fetchone()
+            self.assertIsNone(row["interrupted_at"])
+            self.assertIsNone(row["bytes_received"])
+            self.assertIsNone(row["resume_chunk_index"])
+            self.assertIsNone(row["partial_sha256"])
+            self.assertIsNone(row["sender_identity"])
+            self.assertIsNone(row["original_metadata_json"])
+            self.assertIsNone(row["expire_at"])
+        finally:
+            conn.close()
+
+    def test_db05_save_and_get_interrupted_transfer(self):
+        """save_interrupted_transfer + get_interrupted_transfer round-trip."""
+        from ferry_linux.core.db import DatabaseManager, InterruptedTransferInfo, TransferRecord
+
+        db_path = self.tmpdir / "test_v3.db"
+        db = DatabaseManager(db_path)
+
+        tid = str(uuid.uuid4())
+        now_ms = int(time.time() * 1000)
+        expire_ms = InterruptedTransferInfo.make_expire_at(now_ms)
+
+        # Insert a basic transfer_history row first
+        import time as time_mod
+        record = TransferRecord(
+            transfer_id=tid, device_id="dev-1", file_name="big.bin",
+            file_size=10 * 1024 * 1024, direction="INCOMING", status="INTERRUPTED",
+            started_at=now_ms, completed_at=None, sha256="a" * 64,
+        )
+        db.add_transfer(record)
+
+        info = InterruptedTransferInfo(
+            transfer_id=tid,
+            bytes_received=5 * 1024 * 1024,
+            resume_chunk_index=80,
+            partial_sha256="dead" + "00" * 30,
+            sender_identity="SENDER_PUB_KEY_B64",
+            original_metadata_json='{"transfer_id": "' + tid + '"}',
+            interrupted_at=now_ms,
+            expire_at=expire_ms,
+        )
+        db.save_interrupted_transfer(info)
+
+        fetched = db.get_interrupted_transfer(tid)
+        self.assertIsNotNone(fetched)
+        self.assertEqual(fetched.transfer_id, tid)
+        self.assertEqual(fetched.bytes_received, 5 * 1024 * 1024)
+        self.assertEqual(fetched.resume_chunk_index, 80)
+        self.assertEqual(fetched.sender_identity, "SENDER_PUB_KEY_B64")
+        self.assertEqual(fetched.expire_at, expire_ms)
+
+    def test_db06_get_interrupted_returns_none_for_completed(self):
+        """get_interrupted_transfer must return None if the transfer is COMPLETED."""
+        from ferry_linux.core.db import DatabaseManager, TransferRecord
+
+        db_path = self.tmpdir / "test_v3b.db"
+        db = DatabaseManager(db_path)
+
+        tid = str(uuid.uuid4())
+        now_ms = int(time.time() * 1000)
+        record = TransferRecord(
+            transfer_id=tid, device_id="dev-1", file_name="done.bin",
+            file_size=100, direction="INCOMING", status="COMPLETED",
+            started_at=now_ms, completed_at=now_ms + 1000, sha256="b" * 64,
+        )
+        db.add_transfer(record)
+
+        result = db.get_interrupted_transfer(tid)
+        self.assertIsNone(result)
+
+    def test_db07_expire_interrupted_transfers(self):
+        """expire_interrupted_transfers() marks expired INTERRUPTED rows as FAILED."""
+        from ferry_linux.core.db import DatabaseManager, InterruptedTransferInfo, TransferRecord
+
+        db_path = self.tmpdir / "test_v3c.db"
+        db = DatabaseManager(db_path)
+
+        tid = str(uuid.uuid4())
+        now_ms = int(time.time() * 1000)
+        past_ms = now_ms - (8 * 24 * 60 * 60 * 1000)  # 8 days ago = already expired
+
+        record = TransferRecord(
+            transfer_id=tid, device_id="dev-1", file_name="stale.bin",
+            file_size=1000, direction="INCOMING", status="INTERRUPTED",
+            started_at=past_ms, completed_at=None, sha256="c" * 64,
+        )
+        db.add_transfer(record)
+
+        info = InterruptedTransferInfo(
+            transfer_id=tid, bytes_received=500, resume_chunk_index=0,
+            partial_sha256="0" * 64, sender_identity="KEY", original_metadata_json="{}",
+            interrupted_at=past_ms, expire_at=past_ms + InterruptedTransferInfo.RESUME_TTL_MS,
+        )
+        db.save_interrupted_transfer(info)
+
+        # Expiry should catch this row
+        count = db.expire_interrupted_transfers(now_ms=now_ms)
+        self.assertEqual(count, 1)
+
+        # Row must now be FAILED, not INTERRUPTED
+        result = db.get_interrupted_transfer(tid)
+        self.assertIsNone(result)
+
+        # Verify it's FAILED in the DB
+        transfers = db.list_transfers()
+        match = [t for t in transfers if t.transfer_id == tid]
+        self.assertEqual(len(match), 1)
+        self.assertEqual(match[0].status, "FAILED")
+
+
+class TestPhase3ETask2ResumeNegotiation(unittest.TestCase):
+    """
+    Phase 3E Task 2: Resume Negotiation Protocol unit tests.
+    """
+
+    def setUp(self) -> None:
+        self.tmpdir = Path(tempfile.mkdtemp())
+
+    def tearDown(self) -> None:
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _make_interrupted_transfer(self, data: bytes) -> IncomingTransfer:
+        sha256 = hashlib.sha256(data).hexdigest()
+        meta = _make_meta(
+            file_size=len(data) + CHUNK_SIZE,  # Total file is larger than current data
+            chunk_size=CHUNK_SIZE,
+            sha256=sha256,
+        )
+        incoming = IncomingTransfer(meta=meta, download_dir=self.tmpdir)
+        incoming.begin()
+        offset = 0
+        seq = 0
+        while offset < len(data):
+            chunk = data[offset:offset + CHUNK_SIZE]
+            incoming.receive_chunk(ChunkFrame(meta.transfer_id, seq, chunk))
+            offset += len(chunk)
+            seq += 1
+        incoming.interrupt()
+        return incoming
+
+    # 12. prepare_resume_request on valid .part
+    def test_12_prepare_resume_request_valid_part(self) -> None:
+        data = b"\x44" * (CHUNK_SIZE * 2)
+        incoming = self._make_interrupted_transfer(data)
+        self.assertEqual(incoming.state, TransferState.INTERRUPTED)
+
+        payload = incoming.prepare_resume_request()
+        from ferry_linux.protocol.models import TransferResumeRequestPayload
+        self.assertIsInstance(payload, TransferResumeRequestPayload)
+        self.assertEqual(payload.transfer_id, incoming.meta.transfer_id)
+        self.assertEqual(payload.resume_offset_bytes, len(data))
+        self.assertEqual(payload.resume_chunk_index, 2)
+        self.assertEqual(payload.partial_sha256, hashlib.sha256(data).hexdigest().lower())
+        self.assertEqual(payload.protocol_version, 1)
+
+    # 13. prepare_resume_request uses actual disk size
+    def test_13_prepare_resume_request_uses_actual_disk_size(self) -> None:
+        data = b"\x55" * (CHUNK_SIZE * 2)
+        incoming = self._make_interrupted_transfer(data)
+
+        # Mutate in-memory counters to stale values
+        incoming._bytes_received = 999999
+        incoming._next_seq = 99
+
+        # Append another full chunk directly on disk
+        extra = b"\x66" * CHUNK_SIZE
+        with open(incoming._temp_path, "ab") as f:
+            f.write(extra)
+
+        expected_size = (2 + 1) * CHUNK_SIZE
+        payload = incoming.prepare_resume_request()
+        # Must derive from actual disk, not the stale in-memory counters
+        self.assertEqual(payload.resume_offset_bytes, expected_size)
+        self.assertEqual(payload.resume_chunk_index, 3)
+        self.assertEqual(incoming.bytes_received, expected_size)
+        self.assertEqual(incoming._next_seq, 3)
+
+    # 14. prepare_resume_request computes SHA-256 from disk
+    def test_14_prepare_resume_request_computes_sha256_from_disk(self) -> None:
+        data = b"\x77" * CHUNK_SIZE
+        incoming = self._make_interrupted_transfer(data)
+        in_memory_hash = incoming._hasher.hexdigest().lower()
+
+        # Overwrite file on disk with completely different data of same length
+        diff_data = b"\x88" * CHUNK_SIZE
+        with open(incoming._temp_path, "wb") as f:
+            f.write(diff_data)
+
+        payload = incoming.prepare_resume_request()
+        expected_disk_hash = hashlib.sha256(diff_data).hexdigest().lower()
+
+        # Must match disk, NOT the in-memory accumulator!
+        self.assertEqual(payload.partial_sha256, expected_disk_hash)
+        self.assertNotEqual(payload.partial_sha256, in_memory_hash)
+
+    # 15. missing .part
+    def test_15_missing_part_file_raises(self) -> None:
+        data = b"\x99" * CHUNK_SIZE
+        incoming = self._make_interrupted_transfer(data)
+
+        # Delete the .part file
+        incoming._temp_path.unlink()
+
+        with self.assertRaises(FileNotFoundError):
+            incoming.prepare_resume_request()
+
+    # 16. invalid/non-interrupted state
+    def test_16_invalid_non_interrupted_state_raises(self) -> None:
+        data = b"\xAA" * CHUNK_SIZE
+        sha256 = hashlib.sha256(data).hexdigest()
+        meta = _make_meta(file_size=len(data) * 2, chunk_size=CHUNK_SIZE, sha256=sha256)
+
+        # In IDLE state
+        idle_incoming = IncomingTransfer(meta=meta, download_dir=self.tmpdir)
+        with self.assertRaises(RuntimeError):
+            idle_incoming.prepare_resume_request()
+
+        # In TRANSFERRING state
+        transferring_incoming = IncomingTransfer(meta=meta, download_dir=self.tmpdir)
+        transferring_incoming.begin()
+        transferring_incoming.receive_chunk(ChunkFrame(meta.transfer_id, 0, data))
+        with self.assertRaises(RuntimeError):
+            transferring_incoming.prepare_resume_request()
+
+        # In CANCELLED state
+        transferring_incoming.cancel()
+        with self.assertRaises(RuntimeError):
+            transferring_incoming.prepare_resume_request()
+
+    # 17. partial-file boundary validation
+    def test_17_partial_file_boundary_validation(self) -> None:
+        data = b"\xBB" * CHUNK_SIZE
+        incoming = self._make_interrupted_transfer(data)
+
+        # Append partial chunk (unaligned by 123 bytes)
+        with open(incoming._temp_path, "ab") as f:
+            f.write(b"\xCC" * 123)
+
+        # Must fail safely without truncating or padding
+        with self.assertRaises(ValueError):
+            incoming.prepare_resume_request()
+
+        # Check file was NOT silently truncated or padded
+        self.assertEqual(incoming._temp_path.stat().st_size, CHUNK_SIZE + 123)
+
+    # 18. large .part streaming without whole-file loading
+    def test_18_large_part_streaming_without_whole_file_loading(self) -> None:
+        # Create 4 chunks on disk
+        data = b"\xDD" * (CHUNK_SIZE * 4)
+        incoming = self._make_interrupted_transfer(data)
+
+        read_sizes = []
+        orig_open = open
+
+        from unittest.mock import patch
+
+        class MonitoredFile:
+            def __init__(self, f):
+                self._f = f
+            def read(self, size=-1):
+                read_sizes.append(size)
+                return self._f.read(size)
+            def __enter__(self):
+                self._f.__enter__()
+                return self
+            def __exit__(self, *args):
+                return self._f.__exit__(*args)
+
+        def mock_open_fn(path, mode="r", *args, **kwargs):
+            real_f = orig_open(path, mode, *args, **kwargs)
+            if "rb" in mode and str(path).endswith(".part"):
+                return MonitoredFile(real_f)
+            return real_f
+
+        with patch("builtins.open", side_effect=mock_open_fn):
+            payload = incoming.prepare_resume_request()
+
+        self.assertEqual(payload.resume_chunk_index, 4)
+        # Verify read was called with bounded chunks (<= 65536) and not -1 or whole file
+        self.assertGreater(len(read_sizes), 1)
+        for s in read_sizes:
+            self.assertLessEqual(s, CHUNK_SIZE)
+            self.assertGreater(s, 0)
+
+    # 19. zero-byte partial file
+    def test_19_zero_byte_partial_file_raises(self) -> None:
+        data = b"\xEE" * CHUNK_SIZE
+        incoming = self._make_interrupted_transfer(data)
+        # Truncate to 0
+        with open(incoming._temp_path, "wb") as f:
+            pass
+
+        with self.assertRaises(ValueError):
+            incoming.prepare_resume_request()
+
+    # 20. inconsistent DB metadata
+    def test_20_inconsistent_db_metadata_raises(self) -> None:
+        data = b"\xFF" * (CHUNK_SIZE * 2)
+        incoming = self._make_interrupted_transfer(data)
+
+        # Mismatched expected_bytes
+        with self.assertRaises(ValueError):
+            incoming.prepare_resume_request(expected_bytes=CHUNK_SIZE)
+
+        # Mismatched expected_chunk_index
+        with self.assertRaises(ValueError):
+            incoming.prepare_resume_request(expected_chunk_index=1)
+
+        # Matching metadata succeeds
+        payload = incoming.prepare_resume_request(
+            expected_bytes=CHUNK_SIZE * 2,
+            expected_chunk_index=2,
+        )
+        self.assertEqual(payload.resume_chunk_index, 2)
+
+    # 21. service layer resume message dispatch
+    def test_21_service_layer_resume_message_dispatch(self) -> None:
+        from ferry_linux.core.service import FerryService
+        from ferry_linux.protocol.models import (
+            FerryEnvelope,
+            MessageType,
+            ResumeRejectReason,
+        )
+        from unittest.mock import MagicMock
+
+        service = FerryService(self.tmpdir)
+        mock_ps = MagicMock()
+        mock_ps.remote_addr = "127.0.0.1:53770"
+        mock_ps.remote_device_id = "test-peer"
+        mock_ps._transfer_events = {}
+        mock_ps._result_events = {}
+
+        tid = str(uuid.uuid4())
+
+        # Test TRANSFER_RESUME_REQUEST dispatch
+        env_req = FerryEnvelope(
+            type=MessageType.TRANSFER_RESUME_REQUEST.value,
+            payload={
+                "transfer_id": tid,
+                "resume_offset_bytes": CHUNK_SIZE,
+                "resume_chunk_index": 1,
+                "partial_sha256": "0" * 64,
+                "protocol_version": 1,
+            },
+        )
+        asyncio.run(service._handle_transfer_message(mock_ps, env_req))
+
+        # Test TRANSFER_RESUME_ACCEPT dispatch
+        env_accept = FerryEnvelope(
+            type=MessageType.TRANSFER_RESUME_ACCEPT.value,
+            payload={
+                "transfer_id": tid,
+                "resume_chunk_index": 1,
+                "protocol_version": 1,
+            },
+        )
+        asyncio.run(service._handle_transfer_message(mock_ps, env_accept))
+
+        # Test TRANSFER_RESUME_REJECT dispatch
+        env_reject = FerryEnvelope(
+            type=MessageType.TRANSFER_RESUME_REJECT.value,
+            payload={
+                "transfer_id": tid,
+                "reason": ResumeRejectReason.SOURCE_MODIFIED.value,
+            },
+        )
+        asyncio.run(service._handle_transfer_message(mock_ps, env_reject))
+
+
+class TestPhase3ETask3ResumeExecution(unittest.TestCase):
+    """
+    Phase 3E Task 3 tests: resume execution layer.
+
+    Tests:
+    T3-01. RESUME_REQUESTED and RESUMING states exist in TransferState
+    T3-02. INTERRUPTED -> RESUME_REQUESTED -> RESUMING valid transitions
+    T3-03. RESUMING -> COMPLETED valid transition
+    T3-04. RESUMING -> INTERRUPTED valid transition (re-interrupt)
+    T3-05. IncomingTransfer.resume() re-opens .part and sets _next_seq
+    T3-06. IncomingTransfer.resume() seeds SHA-256 from .part contents
+    T3-07. IncomingTransfer.resume() fails if .part file missing
+    T3-08. IncomingTransfer.resume() fails if called from non-INTERRUPTED state
+    T3-09. receive_chunk() works in RESUMING state
+    T3-10. OutgoingTransfer.stream_chunks_from(0) == stream_chunks()
+    T3-11. OutgoingTransfer.stream_chunks_from(N) starts at correct seq
+    T3-12. stream_chunks_from() seek beyond EOF raises TransferError
+    T3-13. _compute_prefix_sha256 matches manual SHA-256 prefix
+    T3-14. _compute_prefix_sha256 returns None for truncated file
+    T3-15. service.discard_interrupted_transfer removes .part and clears DB
+    """
+
+    def setUp(self):
+        self.tmpdir = Path(tempfile.mkdtemp())
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _make_interrupted_incoming(
+        self, data: bytes
+    ) -> "IncomingTransfer":
+        """Create an IncomingTransfer in INTERRUPTED state with .part file written."""
+        sha256 = hashlib.sha256(data).hexdigest()
+        chunk_size = CHUNK_SIZE
+        chunk_count = (len(data) + chunk_size - 1) // chunk_size
+        meta = TransferMetadata(
+            transfer_id=str(uuid.uuid4()),
+            file_name="resume_test.bin",
+            file_size=len(data),
+            mime_type="application/octet-stream",
+            sha256=sha256,
+            chunk_size=chunk_size,
+            chunk_count=chunk_count,
+            sender_identity="dGVzdA==",
+            created_at=0,
+        )
+        incoming = IncomingTransfer(meta=meta, download_dir=self.tmpdir)
+        incoming.begin()
+
+        # Write data chunk by chunk to reach TRANSFERRING state
+        for i, start in enumerate(range(0, len(data), chunk_size)):
+            chunk = data[start : start + chunk_size]
+            frame = encode_chunk_frame(meta.transfer_id, i, chunk)
+            cf = ChunkFrame(
+                transfer_id=meta.transfer_id,
+                seq=i,
+                data=chunk,
+            )
+            incoming.receive_chunk(cf)
+
+        # Now interrupt
+        incoming.interrupt()
+        return incoming
+
+    # T3-01
+    def test_t301_new_states_exist(self):
+        """RESUME_REQUESTED and RESUMING must be valid TransferState values."""
+        self.assertIn("RESUME_REQUESTED", [s.name for s in TransferState])
+        self.assertIn("RESUMING", [s.name for s in TransferState])
+
+    # T3-02
+    def test_t302_interrupted_to_resuming_via_resume_requested(self):
+        """INTERRUPTED -> RESUME_REQUESTED -> RESUMING valid via state machine."""
+        s = _transfer_transition(TransferState.INTERRUPTED, TransferState.RESUME_REQUESTED)
+        self.assertEqual(s, TransferState.RESUME_REQUESTED)
+        s2 = _transfer_transition(TransferState.RESUME_REQUESTED, TransferState.RESUMING)
+        self.assertEqual(s2, TransferState.RESUMING)
+
+    # T3-03
+    def test_t303_resuming_to_completed(self):
+        """RESUMING -> COMPLETED is a valid transition."""
+        s = _transfer_transition(TransferState.RESUMING, TransferState.COMPLETED)
+        self.assertEqual(s, TransferState.COMPLETED)
+
+    # T3-04
+    def test_t304_resuming_to_interrupted(self):
+        """RESUMING -> INTERRUPTED is valid (re-interrupt on second disconnect)."""
+        s = _transfer_transition(TransferState.RESUMING, TransferState.INTERRUPTED)
+        self.assertEqual(s, TransferState.INTERRUPTED)
+
+    # T3-05
+    def test_t305_resume_reopens_file_and_sets_next_seq(self):
+        """resume() re-opens the .part file in append mode and sets _next_seq."""
+        data = b"\xAB" * (CHUNK_SIZE * 3)
+        incoming = self._make_interrupted_incoming(data)
+        self.assertEqual(incoming.state, TransferState.INTERRUPTED)
+
+        chunk_index = incoming._next_seq  # 3 chunks written
+        self.assertEqual(chunk_index, 3)
+
+        incoming.resume(chunk_index)
+        self.assertEqual(incoming.state, TransferState.RESUMING)
+        self.assertEqual(incoming._next_seq, chunk_index)
+        self.assertIsNotNone(incoming._temp_fh)
+
+        # File handle must be open in append mode
+        self.assertFalse(incoming._temp_fh.closed)
+        incoming._temp_fh.close()
+
+    # T3-06
+    def test_t306_resume_seeds_sha256_from_part(self):
+        """resume() re-reads the .part file to seed the SHA-256 accumulator."""
+        data = b"\xCD" * CHUNK_SIZE
+        incoming = self._make_interrupted_incoming(data)
+
+        # The hasher after interrupt should NOT be the seeded one yet.
+        # After resume(), the hasher should reflect the prefix.
+        incoming.resume(incoming._next_seq)
+
+        # Compute expected prefix hash manually
+        expected_hash = hashlib.sha256(data).hexdigest()
+
+        # finalise() should succeed if we don't append any more data
+        # (transfer is already 100% complete in this test).
+        # First close the file handle that resume() opened so finalise() can rename.
+        incoming._temp_fh.close()
+        incoming._state = _transfer_transition(TransferState.RESUMING, TransferState.COMPLETED)
+        # Get the digest from the hasher directly
+        actual = incoming._hasher.hexdigest()
+        self.assertEqual(actual, expected_hash)
+
+    # T3-07
+    def test_t307_resume_fails_if_part_missing(self):
+        """resume() raises FileNotFoundError if .part file is gone."""
+        data = b"\xEE" * CHUNK_SIZE
+        incoming = self._make_interrupted_incoming(data)
+
+        # Delete the .part file
+        incoming._temp_path.unlink()
+
+        with self.assertRaises(FileNotFoundError):
+            incoming.resume(1)
+        self.assertEqual(incoming.state, TransferState.FAILED)
+
+    # T3-08
+    def test_t308_resume_from_wrong_state_raises(self):
+        """resume() raises RuntimeError if called when not INTERRUPTED."""
+        meta = _make_meta()
+        incoming = IncomingTransfer(meta=meta, download_dir=self.tmpdir)
+        # IDLE state
+        with self.assertRaises(RuntimeError):
+            incoming.resume(0)
+        incoming.begin()
+        # ACCEPTED (begin() -> ACCEPTED)
+        with self.assertRaises(RuntimeError):
+            incoming.resume(0)
+
+    # T3-09
+    def test_t309_receive_chunk_in_resuming_state(self):
+        """receive_chunk() must work when state == RESUMING."""
+        data = b"\xFF" * (CHUNK_SIZE * 2)
+        incoming = self._make_interrupted_incoming(data)
+        chunk_index = incoming._next_seq
+
+        incoming.resume(chunk_index)
+        self.assertEqual(incoming.state, TransferState.RESUMING)
+
+        # Resume with one more chunk (appending)
+        extra = b"\x00" * 64
+        frame = ChunkFrame(
+            transfer_id=incoming.meta.transfer_id,
+            seq=chunk_index,
+            data=extra,
+        )
+        # This should NOT raise; RESUMING is now accepted by receive_chunk()
+        try:
+            incoming.receive_chunk(frame)
+        except RuntimeError:
+            self.fail("receive_chunk() raised RuntimeError in RESUMING state")
+
+    # T3-10
+    def test_t310_stream_chunks_from_zero_equals_stream_chunks(self):
+        """stream_chunks_from(0) should produce identical frames to stream_chunks()."""
+        data = b"\xAA" * (CHUNK_SIZE * 3 + 42)
+        src = self.tmpdir / "source.bin"
+        src.write_bytes(data)
+
+        fixed_id = str(uuid.uuid4())
+        xfer1 = OutgoingTransfer(source_path=src, receiver_identity="", transfer_id=fixed_id)
+        xfer2 = OutgoingTransfer(source_path=src, receiver_identity="", transfer_id=fixed_id)
+
+        async def collect(gen):
+            result = []
+            async for f in gen:
+                result.append(f)
+            return result
+
+        frames_a = asyncio.run(collect(xfer1.stream_chunks()))
+        frames_b = asyncio.run(collect(xfer2.stream_chunks_from(0)))
+
+        self.assertEqual(len(frames_a), len(frames_b))
+        for i, (a, b) in enumerate(zip(frames_a, frames_b)):
+            self.assertEqual(a, b, f"Frame {i} mismatch")
+
+    # T3-11
+    def test_t311_stream_chunks_from_n_starts_at_correct_seq(self):
+        """stream_chunks_from(N) emits frames with seq starting at N."""
+        from ferry_linux.core.transfer import CHUNK_HEADER_SIZE, ChunkFrame
+        import struct
+
+        data = b"\xBB" * (CHUNK_SIZE * 5)
+        src = self.tmpdir / "source5.bin"
+        src.write_bytes(data)
+
+        resume_at = 3
+        xfer = OutgoingTransfer(source_path=src, receiver_identity="")
+
+        async def collect_seqs():
+            seqs = []
+            async for frame_bytes in xfer.stream_chunks_from(resume_at):
+                # FYCH frame: [4 magic][16 UUID][4 seq][4 payload_len][payload]
+                seq_offset = 4 + 16
+                seq = struct.unpack("!I", frame_bytes[seq_offset:seq_offset + 4])[0]
+                seqs.append(seq)
+            return seqs
+
+        seqs = asyncio.run(collect_seqs())
+        self.assertEqual(seqs[0], resume_at)
+        self.assertEqual(seqs[-1], 4)  # last chunk is chunk 4
+
+    # T3-12
+    def test_t312_stream_chunks_from_beyond_eof_yields_nothing(self):
+        """stream_chunks_from() beyond file end yields no frames (EOF immediate)."""
+        data = b"\xCC" * CHUNK_SIZE
+        src = self.tmpdir / "short.bin"
+        src.write_bytes(data)
+
+        # File has 1 chunk; resuming from chunk 1 should yield 0 frames (already EOF)
+        xfer = OutgoingTransfer(source_path=src, receiver_identity="")
+
+        async def collect():
+            frames = []
+            async for f in xfer.stream_chunks_from(1):
+                frames.append(f)
+            return frames
+
+        frames = asyncio.run(collect())
+        self.assertEqual(frames, [])
+
+    # T3-13
+    def test_t313_compute_prefix_sha256_matches_manual(self):
+        """_compute_prefix_sha256 returns the same hash as a manual SHA-256 of the prefix."""
+        from ferry_linux.core.service import _compute_prefix_sha256
+
+        data = b"\x01\x02\x03" * 1000
+        src = self.tmpdir / "prehash.bin"
+        src.write_bytes(data)
+
+        prefix_len = 1500
+        expected = hashlib.sha256(data[:prefix_len]).hexdigest()
+        actual = _compute_prefix_sha256(src, prefix_len)
+        self.assertEqual(actual, expected)
+
+    # T3-14
+    def test_t314_compute_prefix_sha256_returns_none_for_truncated_file(self):
+        """_compute_prefix_sha256 returns None when file is shorter than requested prefix."""
+        from ferry_linux.core.service import _compute_prefix_sha256
+
+        data = b"\xAB" * 100
+        src = self.tmpdir / "short_prehash.bin"
+        src.write_bytes(data)
+
+        # Request prefix larger than file
+        result = _compute_prefix_sha256(src, 500)
+        self.assertIsNone(result)
+
+    # T3-15
+    def test_t315_discard_interrupted_transfer_cleans_db_and_file(self):
+        """discard_interrupted_transfer() removes .part and marks DB row as FAILED."""
+        from ferry_linux.core.service import FerryService
+        from ferry_linux.core.db import InterruptedTransferInfo
+
+        service = FerryService(self.tmpdir)
+
+        # Set up DB record and .part file
+        staging_dir = Path(service.config.download_dir) / "staging"
+        staging_dir.mkdir(parents=True, exist_ok=True)
+
+        transfer_id = str(uuid.uuid4())
+        part_file = staging_dir / f"{transfer_id}.part"
+        part_file.write_bytes(b"partial data")
+
+        now_ms = int(time.time() * 1000)
+        info = InterruptedTransferInfo(
+            transfer_id=transfer_id,
+            bytes_received=12,
+            resume_chunk_index=1,
+            partial_sha256="a" * 64,
+            sender_identity="dGVzdA==",
+            original_metadata_json="{}",
+            interrupted_at=now_ms,
+            expire_at=InterruptedTransferInfo.make_expire_at(now_ms),
+        )
+        service.db.save_interrupted_transfer(info)
+
+        # Verify .part exists and DB has INTERRUPTED record
+        self.assertTrue(part_file.exists())
+        self.assertIsNotNone(service.db.get_interrupted_transfer(transfer_id))
+
+        # Discard
+        asyncio.run(service.discard_interrupted_transfer(transfer_id))
+
+        # .part must be gone
+        self.assertFalse(part_file.exists())
+        # DB record must no longer be INTERRUPTED
+        result = service.db.get_interrupted_transfer(transfer_id)
+        self.assertIsNone(result)
 
 
 if __name__ == "__main__":

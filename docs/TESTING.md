@@ -85,6 +85,57 @@ cd android && ./gradlew testDebugUnitTest
   - Physical tests PT-1 (disconnect mid-transfer), PT-2 (Cancel via UI), PT-3 (Recovery after failure) executed manually with real Android device and Arch Linux desktop.
   - All three tests PASSED: `.part` files correctly purged mid-flight, correct `FAILED`/`CANCELLED`/`COMPLETED` history entries recorded, Linux GUI did not freeze.
   - See `docs/PHASE_3D.1_PHYSICAL_VERIFICATION.md` for the full physical test log and file hash comparisons.
+* **Phase 3E Task 1 (Persistent Interrupted Transfer Foundation)**:
+  - 15 new Linux tests in `TestPhase3ETask1InterruptedTransfer` (tests E01–E15):
+    - `interrupt()` from `TRANSFERRING` → `INTERRUPTED`
+    - `.part` file retained on disk after `interrupt()`
+    - `bytes_received` matches actual disk size
+    - `resume_chunk_index` correct for full-chunk boundaries
+    - File handle closed after `interrupt()`
+    - `interrupt()` idempotent (second call no-ops)
+    - Metadata accessible after `interrupt()`
+    - `interrupt_info()` snapshot has all required keys
+    - `interrupt()` on `COMPLETED`/`FAILED`/`CANCELLED` is a no-op
+    - `interrupt_info()` returns `None` when not `INTERRUPTED`
+    - Zero-byte transfer → `FAILED`, not `INTERRUPTED`
+    - `TRANSFERRING→INTERRUPTED` is a valid state transition
+    - `INTERRUPTED` has no outgoing transitions in Task 1
+  - 7 new Linux tests in `TestPhase3ETask1DatabaseMigration` (tests DB01–DB07):
+    - Schema v2 → v3 migration adds all 7 new columns
+    - Existing rows survive migration intact
+    - Migration is idempotent
+    - Old rows have NULL for all new resume columns
+    - `save_interrupted_transfer` + `get_interrupted_transfer` round-trip
+    - `get_interrupted_transfer` returns None for COMPLETED transfers
+    - `expire_interrupted_transfers()` marks expired rows as FAILED
+  - **240 total tests: 183 Linux + 57 Android, all passing.**
+  - See `docs/PHASE_3E_TASK1_REPORT.md` for full implementation log.
+* **Phase 3E Task 2 (Resume Negotiation Protocol)**:
+  - 11 new Linux protocol tests in `TestResumeProtocolModels` (`linux/tests/test_protocol_models.py`):
+    - `TRANSFER_RESUME_REQUEST` serialization and envelope framing
+    - `TRANSFER_RESUME_REQUEST` deserialization via `from_dict()`
+    - Invalid transfer ID format rejected
+    - Negative offset rejected
+    - Negative chunk index rejected
+    - Invalid SHA-256 (length, non-hex, uppercase) rejected
+    - Invalid protocol version rejected
+    - Offset / chunk mismatch rejected
+    - `TRANSFER_RESUME_ACCEPT` serialization, deserialization, and validation
+    - `TRANSFER_RESUME_REJECT` serialization, deserialization, and validation
+    - Invalid reject reason rejected (all 6 valid enum reasons verified)
+  - 10 new Linux transfer tests in `TestPhase3ETask2ResumeNegotiation` (`linux/tests/test_transfer.py`):
+    - `prepare_resume_request()` on valid `.part` file
+    - `prepare_resume_request()` uses actual on-disk size (authoritative)
+    - `prepare_resume_request()` computes SHA-256 by streaming from disk (not from in-memory accumulator)
+    - Missing `.part` file raises `FileNotFoundError`
+    - Calling `prepare_resume_request()` in non-INTERRUPTED states raises `RuntimeError`
+    - Partial-file boundary validation (unaligned bytes raise `ValueError`, no truncation or padding)
+    - Large `.part` streaming without whole-file loading (bounded 64 KiB reads verified)
+    - Zero-byte partial file on disk raises `ValueError`
+    - Inconsistent DB metadata raises `ValueError`
+    - Service layer message dispatch routes resume messages without unhandled errors
+  - **261 total tests: 204 Linux + 57 Android, all passing.**
+  - See `docs/PHASE_3E_TASK2_REPORT.md` for full implementation log.
 
 ---
 

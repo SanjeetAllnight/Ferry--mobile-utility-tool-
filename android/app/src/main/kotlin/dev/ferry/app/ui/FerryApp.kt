@@ -91,6 +91,9 @@ fun FerryApp(
     val transferHistory by controlClient?.transferHistory?.collectAsState()
         ?: remember { mutableStateOf(emptyList()) }
 
+    val interruptedTransfers by controlClient?.interruptedTransfers?.collectAsState()
+        ?: remember { mutableStateOf(emptyList()) }
+
     val isEstablished = sessionState == FerrySession.State.ESTABLISHED
 
     // SAF file picker launcher
@@ -337,6 +340,40 @@ fun FerryApp(
                 }
             }
 
+            // ── Interrupted Transfers (Resumable) ──────────────────────────
+            if (interruptedTransfers.isNotEmpty()) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.tertiaryContainer
+                    )
+                ) {
+                    Column(
+                        modifier = Modifier.padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Text(
+                            text = "Interrupted Transfers",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onTertiaryContainer,
+                        )
+                        interruptedTransfers.forEach { record ->
+                            InterruptedTransferRow(
+                                record = record,
+                                onResume = {
+                                    scope.launch { controlClient?.requestResume(record) }
+                                },
+                                onDiscard = {
+                                    controlClient?.discardInterrupted(record.transferId)
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+
             // ── Transfer History ───────────────────────────────────────────
             if (transferHistory.isNotEmpty()) {
                 Card(
@@ -460,6 +497,79 @@ private fun TransferProgressCard(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.7f)
             )
+        }
+    }
+}
+
+// ── Interrupted Transfer Row ──────────────────────────────────────────────────
+
+@Composable
+private fun InterruptedTransferRow(
+    record: dev.ferry.app.transfer.InterruptedTransferStore.InterruptedRecord,
+    onResume: () -> Unit,
+    onDiscard: () -> Unit,
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surface
+    ) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            val dirIcon = if (record.direction == dev.ferry.app.transfer.InterruptedTransferStore.InterruptedRecord.Direction.INCOMING) "↓" else "↑"
+            Text(
+                text = "$dirIcon  ${record.fileName}",
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+
+            val fraction = if (record.fileSize > 0) record.bytesReceived.toFloat() / record.fileSize else 0f
+            LinearProgressIndicator(
+                progress = { fraction },
+                modifier = Modifier.fillMaxWidth(),
+                color = MaterialTheme.colorScheme.tertiary,
+            )
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "${formatBytes(record.bytesReceived)} / ${formatBytes(record.fileSize)} (${(fraction * 100).toInt()}%)",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                )
+                val ageMs = System.currentTimeMillis() - record.interruptedAt
+                val mins = ageMs / 60000
+                Text(
+                    text = if (mins < 60) "${mins}m ago" else "${mins / 60}h ago",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                )
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)
+            ) {
+                TextButton(onClick = onDiscard) {
+                    Text("Discard", color = MaterialTheme.colorScheme.error)
+                }
+                Button(
+                    onClick = onResume,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.tertiary,
+                        contentColor = MaterialTheme.colorScheme.onTertiary
+                    )
+                ) {
+                    Text("Resume")
+                }
+            }
         }
     }
 }

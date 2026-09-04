@@ -86,7 +86,7 @@ class FerryTransferReceiver(
 
     private var state: TransferState = TransferState.IDLE
     private val tempFile: File = File(stagingDir, "${meta.transferId}.part")
-    private val digest: MessageDigest = MessageDigest.getInstance("SHA-256")
+    private var digest: MessageDigest = MessageDigest.getInstance("SHA-256")
     private var bytesReceived: Long = 0L
     private var nextSeq: Int = 0
 
@@ -126,7 +126,7 @@ class FerryTransferReceiver(
      *   cancelled and the .part file is deleted before throwing.
      */
     fun receiveChunk(transferId: String, seq: Int, data: ByteArray) {
-        check(state == TransferState.TRANSFERRING) {
+        check(state == TransferState.TRANSFERRING || state == TransferState.RESUMING) {
             "Cannot receive chunk in state $state"
         }
         require(transferId == meta.transferId) {
@@ -186,6 +186,102 @@ class FerryTransferReceiver(
         state = TransferState.COMPLETED
         Log.i(TAG, "Transfer ${meta.transferId.take(8)} complete → ${finalFile.name} (SHA-256 verified)")
         return true
+    }
+
+    /**
+     * Phase 3E — Interrupt this incoming transfer due to a network disconnect.
+     *
+     * Closes any open file handle and transitions to INTERRUPTED state.  The .part
+     * file is NOT deleted; it is retained on disk so a future resume attempt can
+     * pick up from the current offset.
+     *
+     * Safe to call from TRANSFERRING or RESUMING state only (other states do nothing).
+     * The caller is responsible for persisting the interrupted transfer info to
+     * InterruptedTransferStore before dropping the reference to this object.
+     *
+     * @return the current byte offset (bytes written to .part), or -1 if not eligible.
+     */
+    fun interrupt(): Long {
+        if (state != TransferState.TRANSFERRING && state != TransferState.RESUMING) {
+            Log.w(TAG, "interrupt() called in state $state — ignored")
+            return -1L
+        }
+        // Do NOT delete tempFile — it is retained for resume.
+        state = TransferState.INTERRUPTED
+        Log.i(
+            TAG,
+            "Transfer ${meta.transferId.take(8)} INTERRUPTED at offset $bytesReceived " +
+                "(chunk $nextSeq), .part file retained"
+        )
+        return bytesReceived
+    }
+
+    /**
+     * Phase 3E — Resume an interrupted incoming transfer.
+     *
+     * - Validates that the .part file still exists and its size matches [expectedBytes].
+     * - Re-initialises the SHA-256 digest by re-reading all bytes already in the .part file.
+     * - Sets [nextSeq] to [chunkIndex] so future receiveChunk() calls expect seq starting
+     *   at [chunkIndex].
+     * - Transitions state from INTERRUPTED (or RESUME_REQUESTED) to RESUMING.
+     *
+     * @param chunkIndex  The sender-confirmed resume chunk index (from TRANSFER_RESUME_ACCEPT).
+     * @param expectedBytes  The expected byte count already on disk (from InterruptedTransferStore).
+     *   Pass -1 to skip size validation.
+     * @throws IllegalStateException if not in INTERRUPTED or RESUME_REQUESTED state.
+     * @throws java.io.FileNotFoundException if the .part file is missing.
+     * @throws java.io.IOException if the .part file cannot be read for SHA-256 re-seeding.
+     */
+    fun resume(chunkIndex: Int, expectedBytes: Long = -1L) {
+        check(state == TransferState.INTERRUPTED || state == TransferState.RESUME_REQUESTED) {
+            "resume() called in state $state; must be INTERRUPTED or RESUME_REQUESTED"
+        }
+        if (!tempFile.exists()) {
+            state = TransferState.FAILED
+            failureCause = "Partial staging file lost: ${tempFile.name}"
+            throw java.io.FileNotFoundException("Partial staging file missing: ${tempFile.absolutePath}")
+        }
+        val diskSize = tempFile.length()
+        if (expectedBytes >= 0L && diskSize != expectedBytes) {
+            Log.w(
+                TAG,
+                "resume() for ${meta.transferId.take(8)}: disk size $diskSize != expected $expectedBytes"
+            )
+            // Non-fatal: continue; sender's prefix hash will catch real corruption.
+        }
+
+        // Re-seed the SHA-256 digest from the bytes already on disk.
+        val newDigest = MessageDigest.getInstance("SHA-256")
+        try {
+            tempFile.inputStream().use { fis ->
+                val buf = ByteArray(65536)
+                var n: Int
+                while (fis.read(buf).also { n = it } != -1) {
+                    newDigest.update(buf, 0, n)
+                }
+            }
+        } catch (e: java.io.IOException) {
+            Log.w(TAG, "Could not re-read .part for SHA-256 seed (${meta.transferId.take(8)}): ${e.message}")
+            // Non-fatal — digest may be wrong; finalise() will catch integrity mismatch.
+        }
+
+        // Step through RESUME_REQUESTED if we are still INTERRUPTED
+        // (mirrors the Linux state machine dual-step behaviour).
+        if (state == TransferState.INTERRUPTED) {
+            state = TransferState.RESUME_REQUESTED
+        }
+
+        // Update digest and tracking.
+        digest = newDigest
+        bytesReceived = diskSize
+        nextSeq = chunkIndex
+        state = TransferState.RESUMING
+
+        Log.i(
+            TAG,
+            "Transfer ${meta.transferId.take(8)} RESUMING from chunk $chunkIndex " +
+                "(offset $diskSize bytes)"
+        )
     }
 
     /**

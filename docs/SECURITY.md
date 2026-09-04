@@ -104,3 +104,28 @@ def resolve_safe_destination(download_dir: Path, filename: str) -> Path:
 | **Path Traversal / Arbitrary File Overwrite** | Basename stripping, canonical path verification (`is_relative_to`), and atomic staging. |
 | **Data Corruption / Tampering** | Streaming AEAD framing + End-to-end SHA-256 file digest verification. |
 | **Denial of Service (OOM via huge frames)** | Hard frame limit of 1 MiB for control messages; streaming chunk buffers for data. |
+
+---
+
+## 6. Resumable Transfer Security (Phase 3E Design — Not Yet Implemented)
+
+See `docs/PHASE_3E_DESIGN.md` Section 12 (Security Self-Review) and Section 6 (AEAD/Nonce Strategy) for the full analysis.
+
+### Key invariants
+
+- Resume messages (`TRANSFER_RESUME_REQUEST` etc.) are **only processed inside a fully ESTABLISHED, Ed25519-authenticated session**.
+- The `transfer_id` alone is not a credential; peer identity is verified via the session handshake.
+- Original session AEAD keys are **never reused** across reconnections. A resumed transfer uses fresh ephemeral keys.
+- The receiver derives `resume_chunk_index` from its own locally persisted `bytes_received`. An attacker cannot supply a forged offset without also supplying the correct prefix SHA-256.
+- A prefix SHA-256 cross-check (receiver hashes `.part`; sender hashes same-length source prefix) detects partial corruption and source-file replacement before resuming.
+- Unpairing a peer immediately deletes all INTERRUPTED `.part` files for that peer and marks them FAILED.
+
+### New threat entries
+
+| Threat | Mitigation |
+| :--- | :--- |
+| **Replay of old interrupted transfer chunks** | New session = new ephemeral DH keys. Old ciphertext cannot be decrypted under new keys. |
+| **Fake resume request from wrong peer** | Session Ed25519 authentication + `sender_identity` field comparison vs. DB record. |
+| **Attacker-supplied forged resume offset** | Receiver offset is from local DB, not from sender. Prefix hash cross-check catches any inconsistency. |
+| **Accumulation of stale .part files** | 7-day TTL; on-startup cleanup; explicit Discard UI action. |
+| **Revoked peer resuming old transfer** | Unpair handler deletes all INTERRUPTED transfers for that device_id. |

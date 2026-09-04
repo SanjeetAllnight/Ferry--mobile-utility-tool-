@@ -4,6 +4,7 @@ SQLite Persistence Layer for Ferry.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 from contextlib import contextmanager
@@ -12,7 +13,7 @@ from pathlib import Path
 from typing import Generator, List, Optional
 
 
-DB_SCHEMA_VERSION = 2  # Phase 2B: added identity_public_key_b64
+DB_SCHEMA_VERSION = 3  # Phase 3E Task 1: added resumable transfer columns
 
 
 @dataclass
@@ -32,10 +33,45 @@ class TransferRecord:
     file_name: str
     file_size: int
     direction: str  # "INCOMING" or "OUTGOING"
-    status: str     # "COMPLETED", "FAILED", "CANCELLED"
+    status: str     # "COMPLETED", "FAILED", "CANCELLED", "INTERRUPTED"
     started_at: int
     completed_at: Optional[int]
     sha256: str
+
+
+# ── Phase 3E Task 1: Interrupted transfer persistence ─────────────────────────
+
+@dataclass
+class InterruptedTransferInfo:
+    """
+    Resumable state for an interrupted incoming transfer.
+
+    This dataclass captures all information required to resume a transfer:
+    - bytes_received:         how many bytes are safely written to the .part file
+    - resume_chunk_index:     the next chunk seq the receiver expects
+    - partial_sha256:         SHA-256 of the .part file contents (computed at interrupt time)
+    - sender_identity:        Ed25519 public key of the original sender (base64url)
+    - original_metadata_json: JSON-encoded TransferMetadata blob
+    - interrupted_at:         epoch-ms when the interrupt occurred
+    - expire_at:              epoch-ms after which the .part file may be cleaned up
+                              (default: interrupted_at + 7 days)
+    """
+    transfer_id: str
+    bytes_received: int
+    resume_chunk_index: int
+    partial_sha256: str          # hex SHA-256 of .part bytes written so far
+    sender_identity: str         # base64url Ed25519 public key
+    original_metadata_json: str  # JSON blob of TransferMetadata.to_dict()
+    interrupted_at: int          # epoch-ms
+    expire_at: int               # epoch-ms
+
+    # 7-day TTL constant (milliseconds)
+    RESUME_TTL_MS: int = 7 * 24 * 60 * 60 * 1000
+
+    @staticmethod
+    def make_expire_at(interrupted_at_ms: int) -> int:
+        """Return the default expiry (7 days after interruption)."""
+        return interrupted_at_ms + InterruptedTransferInfo.RESUME_TTL_MS
 
 
 class DatabaseManager:
@@ -112,6 +148,27 @@ class DatabaseManager:
                     """)
                 except Exception:
                     pass  # Column already exists
+
+            if current_version < 3:
+                # Phase 3E Task 1: add resumable transfer columns to transfer_history
+                # All new columns default to NULL so existing rows remain valid.
+                _resume_columns = [
+                    ("interrupted_at",         "INTEGER", "NULL"),
+                    ("bytes_received",          "INTEGER", "NULL"),
+                    ("resume_chunk_index",      "INTEGER", "NULL"),
+                    ("partial_sha256",          "TEXT",    "NULL"),
+                    ("sender_identity",         "TEXT",    "NULL"),
+                    ("original_metadata_json",  "TEXT",    "NULL"),
+                    ("expire_at",               "INTEGER", "NULL"),
+                ]
+                for col_name, col_type, default in _resume_columns:
+                    try:
+                        cursor.execute(
+                            f"ALTER TABLE transfer_history "
+                            f"ADD COLUMN {col_name} {col_type} DEFAULT {default}"
+                        )
+                    except Exception:
+                        pass  # Column already exists — idempotent
 
             cursor.execute(
                 "INSERT OR REPLACE INTO schema_version (version) VALUES (?)",
@@ -239,3 +296,157 @@ class DatabaseManager:
                 )
                 for row in cursor.fetchall()
             ]
+
+    # ── Phase 3E Task 1: Interrupted transfer management ──────────────────────
+
+    def save_interrupted_transfer(self, info: InterruptedTransferInfo) -> None:
+        """
+        Persist resumable state for an interrupted incoming transfer.
+
+        Updates an existing transfer_history row (which must already exist with
+        status INTERRUPTED) with the resume columns, or inserts a minimal row if
+        none exists.  Either way the row is left with status='INTERRUPTED'.
+
+        This is safe to call multiple times for the same transfer_id — each call
+        overwrites the resume columns with the latest values.
+        """
+        now = int(time.time() * 1000)
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT transfer_id FROM transfer_history WHERE transfer_id = ?",
+                (info.transfer_id,),
+            )
+            existing = cursor.fetchone()
+
+            if existing:
+                cursor.execute("""
+                    UPDATE transfer_history SET
+                        status                = 'INTERRUPTED',
+                        interrupted_at        = ?,
+                        bytes_received        = ?,
+                        resume_chunk_index    = ?,
+                        partial_sha256        = ?,
+                        sender_identity       = ?,
+                        original_metadata_json = ?,
+                        expire_at             = ?
+                    WHERE transfer_id = ?
+                """, (
+                    info.interrupted_at,
+                    info.bytes_received,
+                    info.resume_chunk_index,
+                    info.partial_sha256,
+                    info.sender_identity,
+                    info.original_metadata_json,
+                    info.expire_at,
+                    info.transfer_id,
+                ))
+            else:
+                # Row doesn't exist yet — insert a minimal record.
+                # This can happen if the service was interrupted before the
+                # initial transfer_history row was written.
+                cursor.execute("""
+                    INSERT INTO transfer_history (
+                        transfer_id, device_id, file_name, file_size,
+                        direction, status, started_at, completed_at, sha256,
+                        interrupted_at, bytes_received, resume_chunk_index,
+                        partial_sha256, sender_identity, original_metadata_json,
+                        expire_at
+                    ) VALUES (?, '', '', 0, 'INCOMING', 'INTERRUPTED', ?, NULL, '',
+                              ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    info.transfer_id,
+                    now,
+                    info.interrupted_at,
+                    info.bytes_received,
+                    info.resume_chunk_index,
+                    info.partial_sha256,
+                    info.sender_identity,
+                    info.original_metadata_json,
+                    info.expire_at,
+                ))
+            conn.commit()
+
+    def get_interrupted_transfer(self, transfer_id: str) -> Optional[InterruptedTransferInfo]:
+        """
+        Retrieve persisted resume state for a single interrupted transfer.
+        Returns None if no INTERRUPTED row exists for this transfer_id.
+        """
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT transfer_id, bytes_received, resume_chunk_index,
+                       partial_sha256, sender_identity, original_metadata_json,
+                       interrupted_at, expire_at
+                FROM transfer_history
+                WHERE transfer_id = ? AND status = 'INTERRUPTED'
+            """, (transfer_id,))
+            row = cursor.fetchone()
+            if not row:
+                return None
+            return InterruptedTransferInfo(
+                transfer_id=row["transfer_id"],
+                bytes_received=row["bytes_received"] or 0,
+                resume_chunk_index=row["resume_chunk_index"] or 0,
+                partial_sha256=row["partial_sha256"] or "",
+                sender_identity=row["sender_identity"] or "",
+                original_metadata_json=row["original_metadata_json"] or "",
+                interrupted_at=row["interrupted_at"] or 0,
+                expire_at=row["expire_at"] or 0,
+            )
+
+    def list_interrupted_transfers_for_peer(self, sender_identity: str) -> List[InterruptedTransferInfo]:
+        """
+        Return all INTERRUPTED incoming transfer records matching a sender identity.
+        Used on session re-establishment to discover resumable transfers.
+        """
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT transfer_id, bytes_received, resume_chunk_index,
+                       partial_sha256, sender_identity, original_metadata_json,
+                       interrupted_at, expire_at
+                FROM transfer_history
+                WHERE status = 'INTERRUPTED' AND sender_identity = ?
+                ORDER BY interrupted_at DESC
+            """, (sender_identity,))
+            return [
+                InterruptedTransferInfo(
+                    transfer_id=row["transfer_id"],
+                    bytes_received=row["bytes_received"] or 0,
+                    resume_chunk_index=row["resume_chunk_index"] or 0,
+                    partial_sha256=row["partial_sha256"] or "",
+                    sender_identity=row["sender_identity"] or "",
+                    original_metadata_json=row["original_metadata_json"] or "",
+                    interrupted_at=row["interrupted_at"] or 0,
+                    expire_at=row["expire_at"] or 0,
+                )
+                for row in cursor.fetchall()
+            ]
+
+    def expire_interrupted_transfers(self, now_ms: Optional[int] = None) -> int:
+        """
+        Delete .part metadata (set status→FAILED) for all INTERRUPTED transfers
+        whose expire_at has passed.  Returns the number of rows updated.
+
+        Callers are responsible for also deleting the actual .part file from disk
+        before or after calling this method.
+        """
+        now_ms = now_ms if now_ms is not None else int(time.time() * 1000)
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE transfer_history
+                SET status = 'FAILED',
+                    interrupted_at = NULL,
+                    bytes_received = NULL,
+                    resume_chunk_index = NULL,
+                    partial_sha256 = NULL,
+                    sender_identity = NULL,
+                    original_metadata_json = NULL,
+                    expire_at = NULL
+                WHERE status = 'INTERRUPTED' AND expire_at IS NOT NULL AND expire_at <= ?
+            """, (now_ms,))
+            count = cursor.rowcount
+            conn.commit()
+            return count

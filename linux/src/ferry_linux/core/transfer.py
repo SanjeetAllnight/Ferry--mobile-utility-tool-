@@ -1,5 +1,5 @@
 """
-Ferry Transfer Layer — Phase 3A / Phase 3D reliability hardening.
+Ferry Transfer Layer — Phase 3A / Phase 3D reliability hardening / Phase 3E Tasks 1-3.
 
 Implements the reusable secure data transport for file transfers over an already-
 authenticated Ferry control session (ESTABLISHED state).
@@ -34,6 +34,22 @@ Phase 3D reliability additions:
 - OutgoingTransfer.stream_chunks(): guards file-open and reads; raises TransferError
   on IOError so the caller can send TRANSFER_CANCEL and record a FAILED history row.
 
+Phase 3E Task 1 additions:
+- INTERRUPTED transfer state: network disconnect mid-transfer preserves the .part
+  file for a future resume (rather than deleting it).
+- IncomingTransfer.interrupt(): safely closes the file handle and transitions the
+  state to INTERRUPTED, recording the next expected chunk index and bytes received.
+  The .part file is NOT deleted; it is retained for a later resume attempt.
+
+Phase 3E Task 3 additions:
+- RESUME_REQUESTED and RESUMING states added to the transfer state machine.
+- IncomingTransfer.resume(chunk_index): re-opens the .part file in append mode,
+  initialises _next_seq from the persisted chunk index, resets the running SHA-256
+  accumulator to reflect bytes already received, and transitions to RESUMING.
+- OutgoingTransfer.stream_chunks_from(resume_chunk_index): seeks the source file
+  to resume_chunk_index * chunk_size and streams from that offset, with seq numbers
+  starting at resume_chunk_index. No change to the FYCH binary format.
+
 CRITICAL: Do not change the AEAD session keys or nonce counter in this module.
 """
 
@@ -49,6 +65,8 @@ from dataclasses import dataclass, field
 from enum import Enum, auto
 from pathlib import Path
 from typing import AsyncIterator, Callable, Optional
+
+from ..protocol.models import TransferResumeRequestPayload
 
 logger = logging.getLogger("ferry.transfer")
 
@@ -81,31 +99,41 @@ TRANSFER_ACCEPT_TIMEOUT_SECS = 120.0
 class TransferState(Enum):
     """Explicit state machine for one file transfer."""
     IDLE = auto()
-    REQUESTED = auto()      # TRANSFER_REQUEST sent/received; awaiting decision
-    ACCEPTED = auto()       # TRANSFER_ACCEPT exchanged; ready to stream
-    TRANSFERRING = auto()   # Chunks flowing
-    CANCELLING = auto()     # TRANSFER_CANCEL sent; draining
-    COMPLETED = auto()      # SHA-256 verified and file finalised
-    FAILED = auto()         # Error (IO, integrity, protocol)
-    CANCELLED = auto()      # Cancelled by either side
+    REQUESTED = auto()          # TRANSFER_REQUEST sent/received; awaiting decision
+    ACCEPTED = auto()           # TRANSFER_ACCEPT exchanged; ready to stream
+    TRANSFERRING = auto()       # Chunks flowing
+    CANCELLING = auto()         # TRANSFER_CANCEL sent; draining
+    COMPLETED = auto()          # SHA-256 verified and file finalised
+    FAILED = auto()             # Error (IO, integrity, protocol)
+    CANCELLED = auto()          # Cancelled by either side
+    INTERRUPTED = auto()        # Phase 3E: network disconnect mid-transfer; .part retained
+    RESUME_REQUESTED = auto()   # Phase 3E: receiver sent TRANSFER_RESUME_REQUEST; awaiting sender decision
+    RESUMING = auto()           # Phase 3E: resume accepted; chunks flowing from resume_chunk_index
 
     VALID_TRANSITIONS: dict  # defined below
 
 # Define valid state transitions after the class body
 TransferState.VALID_TRANSITIONS = {
-    TransferState.IDLE:        {TransferState.REQUESTED, TransferState.ACCEPTED,
-                                TransferState.TRANSFERRING, TransferState.FAILED,
-                                TransferState.CANCELLED},
-    TransferState.REQUESTED:   {TransferState.ACCEPTED, TransferState.FAILED,
-                                TransferState.CANCELLED},
-    TransferState.ACCEPTED:    {TransferState.TRANSFERRING, TransferState.FAILED,
-                                TransferState.CANCELLED},
-    TransferState.TRANSFERRING:{TransferState.CANCELLING, TransferState.COMPLETED,
-                                TransferState.FAILED},
-    TransferState.CANCELLING:  {TransferState.CANCELLED, TransferState.FAILED},
-    TransferState.COMPLETED:   set(),
-    TransferState.FAILED:      set(),
-    TransferState.CANCELLED:   set(),
+    TransferState.IDLE:             {TransferState.REQUESTED, TransferState.ACCEPTED,
+                                     TransferState.TRANSFERRING, TransferState.FAILED,
+                                     TransferState.CANCELLED},
+    TransferState.REQUESTED:        {TransferState.ACCEPTED, TransferState.FAILED,
+                                     TransferState.CANCELLED},
+    TransferState.ACCEPTED:         {TransferState.TRANSFERRING, TransferState.FAILED,
+                                     TransferState.CANCELLED},
+    TransferState.TRANSFERRING:     {TransferState.CANCELLING, TransferState.COMPLETED,
+                                     TransferState.FAILED, TransferState.INTERRUPTED},
+    TransferState.CANCELLING:       {TransferState.CANCELLED, TransferState.FAILED},
+    TransferState.COMPLETED:        set(),
+    TransferState.FAILED:           set(),
+    TransferState.CANCELLED:        set(),
+    # INTERRUPTED → RESUME_REQUESTED (user taps Resume) or FAILED (user discards / expiry)
+    TransferState.INTERRUPTED:      {TransferState.RESUME_REQUESTED, TransferState.FAILED},
+    # RESUME_REQUESTED → RESUMING (ACCEPT) or FAILED (REJECT / timeout)
+    TransferState.RESUME_REQUESTED: {TransferState.RESUMING, TransferState.FAILED},
+    # RESUMING → COMPLETED (all chunks done), INTERRUPTED (disconnect again), FAILED (IO error)
+    TransferState.RESUMING:         {TransferState.COMPLETED, TransferState.INTERRUPTED,
+                                     TransferState.FAILED},
 }
 
 
@@ -406,11 +434,11 @@ class IncomingTransfer:
         Process one received chunk.
 
         Raises ValueError on sequence mismatch or oversized payload.
-        Raises RuntimeError if not in TRANSFERRING state.
+        Raises RuntimeError if not in TRANSFERRING or RESUMING state.
         Raises TransferError on disk I/O failure (disk full, permission denied, etc.);
           the temp file is cleaned and state is set to FAILED before raising.
         """
-        if self._state != TransferState.TRANSFERRING:
+        if self._state not in (TransferState.TRANSFERRING, TransferState.RESUMING):
             raise RuntimeError(f"Cannot receive chunk in state {self._state.name}")
         if frame.transfer_id != self.meta.transfer_id:
             raise ValueError(
@@ -479,6 +507,327 @@ class IncomingTransfer:
             self.meta.transfer_id[:8], dest,
         )
         return True
+
+    def interrupt(self) -> None:
+        """
+        Phase 3E Task 1 — Interrupt a mid-flight incoming transfer.
+
+        Semantics:
+        - Safely closes the open file handle (flushing OS-level buffers).
+        - Does NOT delete the .part file — it is retained for a future resume.
+        - Sets state to INTERRUPTED.
+        - Records bytes_received and resume_chunk_index from trusted local state.
+          These values are derived from what has actually been written to disk,
+          NOT from any remote-supplied field.
+        - Is idempotent: calling interrupt() more than once on an already-INTERRUPTED
+          transfer has no effect and does not raise.
+        - Does NOT transition CANCELLED, FAILED, or COMPLETED transfers — those
+          terminal states are preserved unchanged.
+
+        Resumability constraints:
+        - Zero-byte transfers (file_size == 0) are not made resumable; this method
+          transitions them to FAILED instead of INTERRUPTED so that the existing
+          zero-byte handling path remains unchanged.
+        - A transfer that has received no data at all (bytes_received == 0 and
+          no .part file) transitions to FAILED rather than INTERRUPTED, since
+          there is nothing to resume from.
+
+        After interrupt(), callers should call db.save_interrupted_transfer() with
+        the interrupt_info() snapshot to persist the resume state.
+        """
+        # Already in a terminal or interrupted state — do nothing.
+        if self._state in (
+            TransferState.INTERRUPTED,
+            TransferState.COMPLETED,
+            TransferState.FAILED,
+            TransferState.CANCELLED,
+        ):
+            return
+
+        # Only TRANSFERRING (and technically ACCEPTED) can be interrupted mid-flight.
+        # Any other in-progress state (IDLE, REQUESTED) has no .part file to preserve.
+        if self._state not in (TransferState.TRANSFERRING, TransferState.ACCEPTED):
+            # Nothing to preserve — treat as a failure.
+            self._state = TransferState.FAILED
+            return
+
+        # Zero-byte transfers cannot be resumed — treat as failure.
+        if self.meta.file_size == 0:
+            self._state = TransferState.FAILED
+            return
+
+        # Close the file handle safely, flushing buffered data to the OS.
+        if self._temp_fh is not None:
+            try:
+                self._temp_fh.flush()
+                self._temp_fh.close()
+            except Exception as exc:
+                logger.warning(
+                    "Could not flush/close temp file for interrupted transfer %s: %s",
+                    self.meta.transfer_id[:8], exc,
+                )
+            finally:
+                self._temp_fh = None
+
+        # Verify the .part file exists and measure actual written bytes.
+        # bytes_received is already tracked per-chunk; use it as the primary source.
+        # Cross-check against the file size on disk for safety.
+        actual_bytes_on_disk: int = 0
+        if self._temp_path is not None and self._temp_path.exists():
+            try:
+                actual_bytes_on_disk = self._temp_path.stat().st_size
+            except OSError:
+                actual_bytes_on_disk = 0
+
+        if actual_bytes_on_disk == 0 and self._bytes_received == 0:
+            # No data written — nothing to resume from.
+            logger.debug(
+                "Interrupt on transfer %s with no data written; treating as FAILED",
+                self.meta.transfer_id[:8],
+            )
+            self._state = TransferState.FAILED
+            return
+
+        # Use the disk-measured size as the authoritative resume offset.
+        # This guards against a scenario where _bytes_received was incremented
+        # but the write failed before data hit the OS page cache.
+        self._bytes_received = actual_bytes_on_disk
+        # Recompute resume_chunk_index from the actual byte count.
+        # For full-chunk boundaries: chunk_index = bytes_on_disk // chunk_size.
+        # For a partial last chunk: we cannot resume mid-chunk safely without
+        # re-reading, so we record the last fully-received chunk boundary.
+        # This may require re-sending the last partial chunk, but is safe.
+        if self.meta.chunk_size > 0:
+            self._next_seq = actual_bytes_on_disk // self.meta.chunk_size
+        # If actual_bytes_on_disk is not a multiple of chunk_size, the last
+        # partial chunk must be discarded and re-sent — record the lower bound.
+        # _next_seq now holds the index of the first chunk that needs re-sending.
+
+        self._state = _transfer_transition(self._state, TransferState.INTERRUPTED)
+        logger.info(
+            "Incoming transfer %s INTERRUPTED at %d bytes (%d chunks); .part file retained at %s",
+            self.meta.transfer_id[:8],
+            self._bytes_received,
+            self._next_seq,
+            self._temp_path,
+        )
+
+    def interrupt_info(self) -> Optional[dict]:
+        """
+        Return a snapshot of the interrupt state suitable for passing to
+        db.save_interrupted_transfer().
+
+        Returns None if the transfer is not in INTERRUPTED state.
+
+        The caller should construct an InterruptedTransferInfo from this dict:
+
+            info_dict = transfer.interrupt_info()
+            if info_dict:
+                now_ms = int(time.time() * 1000)
+                info = InterruptedTransferInfo(
+                    transfer_id=info_dict["transfer_id"],
+                    bytes_received=info_dict["bytes_received"],
+                    resume_chunk_index=info_dict["resume_chunk_index"],
+                    partial_sha256=info_dict["partial_sha256"],
+                    sender_identity=info_dict["sender_identity"],
+                    original_metadata_json=info_dict["original_metadata_json"],
+                    interrupted_at=now_ms,
+                    expire_at=InterruptedTransferInfo.make_expire_at(now_ms),
+                )
+                db.save_interrupted_transfer(info)
+
+        NOTE: partial_sha256 is the SHA-256 of bytes accumulated so far in the
+        running hasher. This matches what has been fed to the hasher, which should
+        equal what is on disk for full chunks.
+
+        IMPORTANT LIMITATION: The partial_sha256 stored here is computed from the
+        running hashlib accumulator, which reflects bytes fed to the hasher during
+        this session. If the process crashed mid-session, the hasher state is lost.
+        In Phase 3E Task 2 (resume negotiation), the partial_sha256 must be
+        re-computed from the .part file on disk before sending TRANSFER_RESUME_REQUEST.
+        This method provides the in-session value for convenience.
+        """
+        if self._state != TransferState.INTERRUPTED:
+            return None
+        return {
+            "transfer_id": self.meta.transfer_id,
+            "bytes_received": self._bytes_received,
+            "resume_chunk_index": self._next_seq,
+            "partial_sha256": self._hasher.hexdigest(),
+            "sender_identity": self.meta.sender_identity,
+            "original_metadata_json": __import__("json").dumps(self.meta.to_dict()),
+        }
+
+    def prepare_resume_request(
+        self,
+        expected_bytes: Optional[int] = None,
+        expected_chunk_index: Optional[int] = None,
+    ) -> TransferResumeRequestPayload:
+        """
+        Phase 3E Task 2 — Prepare a resume request from the actual .part file on disk.
+
+        Preconditions & Invariants:
+        - The transfer must be in INTERRUPTED state.
+        - The .part file must exist on disk.
+        - The .part file size must be non-zero and aligned to the chunk boundary
+          (meta.chunk_size). No partial chunks are silently truncated or padded.
+        - The .part file size must not exceed the expected file size.
+        - If expected_bytes or expected_chunk_index are provided (e.g. from persisted DB metadata),
+          they must match the actual disk state.
+        - Authoritative SHA-256 of the partial file is computed by streaming the .part
+          file from disk in bounded reads (64 KiB). The in-memory accumulator is NOT used.
+
+        Returns a validated TransferResumeRequestPayload.
+        """
+        if self._state != TransferState.INTERRUPTED:
+            raise RuntimeError(
+                f"Cannot prepare resume request in state {self._state.name}; transfer must be INTERRUPTED"
+            )
+
+        if self._temp_path is None or not self._temp_path.exists():
+            raise FileNotFoundError(
+                f"Partial staging file does not exist for transfer {self.meta.transfer_id}: {self._temp_path}"
+            )
+
+        disk_size = self._temp_path.stat().st_size
+        if disk_size == 0:
+            raise ValueError(
+                f"Partial staging file is 0 bytes for transfer {self.meta.transfer_id}; cannot resume"
+            )
+
+        if self.meta.file_size <= 0:
+            raise ValueError(
+                f"Invalid file_size {self.meta.file_size} for transfer {self.meta.transfer_id}"
+            )
+
+        if disk_size > self.meta.file_size:
+            raise ValueError(
+                f"Partial file size ({disk_size}) exceeds declared file_size ({self.meta.file_size})"
+            )
+
+        if self.meta.chunk_size <= 0:
+            raise ValueError(
+                f"Invalid chunk_size {self.meta.chunk_size} for transfer {self.meta.transfer_id}"
+            )
+
+        if disk_size % self.meta.chunk_size != 0:
+            raise ValueError(
+                f"Partial file size {disk_size} is not aligned to chunk boundary "
+                f"{self.meta.chunk_size} (remainder: {disk_size % self.meta.chunk_size})"
+            )
+
+        resume_chunk_index = disk_size // self.meta.chunk_size
+
+        if expected_bytes is not None and expected_bytes != disk_size:
+            raise ValueError(
+                f"Inconsistent metadata: disk size {disk_size} != expected {expected_bytes}"
+            )
+
+        if expected_chunk_index is not None and expected_chunk_index != resume_chunk_index:
+            raise ValueError(
+                f"Inconsistent metadata: disk chunk index {resume_chunk_index} != expected {expected_chunk_index}"
+            )
+        # Compute SHA-256 by streaming the .part file from disk (bounded 64 KiB reads)
+        hasher = hashlib.sha256()
+        buf_size = 65536
+        with open(self._temp_path, "rb") as f:
+            while True:
+                block = f.read(buf_size)
+                if not block:
+                    break
+                hasher.update(block)
+
+        partial_sha256 = hasher.hexdigest().lower()
+
+        # Update local tracking to match disk state
+        self._bytes_received = disk_size
+        self._next_seq = resume_chunk_index
+
+        return TransferResumeRequestPayload(
+            transfer_id=self.meta.transfer_id,
+            resume_offset_bytes=disk_size,
+            resume_chunk_index=resume_chunk_index,
+            partial_sha256=partial_sha256,
+            protocol_version=1,
+        )
+
+    def resume(self, chunk_index: int) -> None:
+        """
+        Phase 3E Task 3 — Resume an interrupted incoming transfer.
+
+        Semantics:
+        - The transfer must be in INTERRUPTED or RESUME_REQUESTED state.
+        - Re-opens the .part file in binary-append mode at its current end position.
+        - Sets _next_seq to chunk_index so that the first resumed chunk frame is
+          expected to carry seq == chunk_index (matching what the sender will send).
+        - Resets the running SHA-256 hasher and re-feeds it from the .part file on
+          disk so that finalise() can compute a valid full-file hash.
+        - Transitions to RESUMING.
+
+        After resume(), the caller should begin receiving chunks from the sender at
+        the negotiated resume_chunk_index.  The binary FYCH seq numbers will start
+        at chunk_index; receive_chunk() is tolerant of non-zero starting seq because
+        we initialise _next_seq here.
+
+        Raises:
+          RuntimeError: if not in INTERRUPTED or RESUME_REQUESTED state.
+          FileNotFoundError: if the .part file has disappeared from disk.
+          TransferError: if the .part file cannot be re-opened for appending.
+        """
+        if self._state not in (TransferState.INTERRUPTED, TransferState.RESUME_REQUESTED):
+            raise RuntimeError(
+                f"Cannot resume from state {self._state.name}; "
+                f"transfer must be INTERRUPTED or RESUME_REQUESTED"
+            )
+
+        # If called directly from INTERRUPTED (e.g. tests, or one-step path without
+        # explicit request_resume()), pass through RESUME_REQUESTED first to satisfy
+        # the state machine before transitioning to RESUMING.
+        if self._state == TransferState.INTERRUPTED:
+            self._state = _transfer_transition(self._state, TransferState.RESUME_REQUESTED)
+
+        if self._temp_path is None or not self._temp_path.exists():
+            self._state = TransferState.FAILED
+            raise FileNotFoundError(
+                f"Partial staging file lost for transfer {self.meta.transfer_id}: {self._temp_path}"
+            )
+
+        # Re-open the .part file in append mode (writes will go to the end).
+        try:
+            self._temp_fh = open(self._temp_path, "ab")
+        except OSError as exc:
+            self._state = TransferState.FAILED
+            raise TransferError(
+                f"Cannot re-open .part file for resume {self.meta.transfer_id[:8]}: {exc}"
+            ) from exc
+
+        # Re-initialise the SHA-256 accumulator from the bytes already on disk.
+        # This is required so that finalise() computes a valid full-file hash.
+        hasher = hashlib.sha256()
+        try:
+            with open(self._temp_path, "rb") as fh:
+                for block in iter(lambda: fh.read(65536), b""):
+                    hasher.update(block)
+        except OSError as exc:
+            # Non-fatal: we can still accumulate resumed chunks, but the
+            # final hash will only cover resumed bytes — not the prefix.
+            # This is acceptable; finalise() will reject a wrong hash.
+            logger.warning(
+                "Could not re-read .part prefix for SHA-256 seed for transfer %s: %s",
+                self.meta.transfer_id[:8], exc,
+            )
+        self._hasher = hasher
+
+        # Update tracking from disk-authoritative state.
+        disk_size = self._temp_path.stat().st_size
+        self._bytes_received = disk_size
+        self._next_seq = chunk_index  # sender-confirmed chunk index
+
+        self._state = _transfer_transition(self._state, TransferState.RESUMING)
+        logger.info(
+            "Incoming transfer %s RESUMING from chunk %d (offset %d bytes)",
+            self.meta.transfer_id[:8], chunk_index, disk_size,
+        )
 
     def cancel(self) -> None:
         """Cancel the transfer and remove temp file.
@@ -593,8 +942,43 @@ class OutgoingTransfer:
         (e.g., file deleted mid-transfer, permission revoked, disk error).  State is
         set to FAILED before raising so the caller can detect the terminal condition.
         """
+        async for frame_bytes in self._stream_chunks_internal(resume_chunk_index=0):
+            yield frame_bytes
+
+    async def stream_chunks_from(self, resume_chunk_index: int) -> AsyncIterator[bytes]:
+        """
+        Phase 3E Task 3 — Async generator that yields encoded TRANSFER_CHUNK frames
+        starting from resume_chunk_index.
+
+        The source file is seeked to resume_chunk_index * CHUNK_SIZE bytes before
+        streaming begins.  FYCH seq numbers start at resume_chunk_index, not 0, so
+        the receiver's _next_seq (already set to resume_chunk_index by resume()) is
+        satisfied.
+
+        Raises TransferError if the file cannot be seeked (e.g. offset beyond EOF)
+        or if a read error occurs.  State is set to FAILED before raising.
+
+        Precondition: the transfer must be in IDLE or TRANSFERRING state (managed by
+        the caller: stream_chunks_from() sets TRANSFERRING immediately).
+        """
+        if resume_chunk_index < 0:
+            raise ValueError(f"resume_chunk_index must be non-negative, got {resume_chunk_index}")
+        async for frame_bytes in self._stream_chunks_internal(resume_chunk_index=resume_chunk_index):
+            yield frame_bytes
+
+    async def _stream_chunks_internal(
+        self, resume_chunk_index: int
+    ) -> AsyncIterator[bytes]:
+        """
+        Shared streaming implementation for stream_chunks() and stream_chunks_from().
+
+        Opens the source file, seeks to resume_chunk_index * CHUNK_SIZE, and emits
+        encoded FYCH frames with seq starting at resume_chunk_index.  On TransferError
+        the caller should catch and handle; state is already FAILED.
+        """
         self._state = _transfer_transition(self._state, TransferState.TRANSFERRING)
-        seq = 0
+        seq = resume_chunk_index
+        seek_offset = resume_chunk_index * CHUNK_SIZE
         try:
             fh = open(self._source_path, "rb")
         except OSError as exc:
@@ -607,6 +991,22 @@ class OutgoingTransfer:
                 f"Cannot read source file for transfer {self.transfer_id[:8]}: {exc}"
             ) from exc
         try:
+            if seek_offset > 0:
+                try:
+                    fh.seek(seek_offset)
+                    actual_pos = fh.tell()
+                    if actual_pos != seek_offset:
+                        self._state = TransferState.FAILED
+                        raise TransferError(
+                            f"Seek to offset {seek_offset} failed for transfer "
+                            f"{self.transfer_id[:8]}: landed at {actual_pos}"
+                        )
+                except OSError as exc:
+                    self._state = TransferState.FAILED
+                    raise TransferError(
+                        f"Cannot seek source file for resume of transfer "
+                        f"{self.transfer_id[:8]}: {exc}"
+                    ) from exc
             while True:
                 if self._cancelled:
                     self._state = TransferState.CANCELLING
