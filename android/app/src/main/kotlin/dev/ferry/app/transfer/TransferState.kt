@@ -45,6 +45,8 @@ data class TransferMetadata(
     val senderIdentity: String, // base64url Ed25519 public key
     val createdAt: Long,
     val protocolVersion: Int = 1,
+    val batchId: String = "",
+    val relativePath: String = "",
 ) {
     companion object {
         const val MAX_FILE_NAME_BYTES = 255
@@ -67,6 +69,8 @@ data class TransferMetadata(
                 "sender_identity" to obj.optString("sender_identity", ""),
                 "created_at" to obj.optLong("created_at", System.currentTimeMillis()),
                 "protocol_version" to obj.optInt("protocol_version", 1),
+                "batch_id" to obj.optString("batch_id", ""),
+                "relative_path" to obj.optString("relative_path", ""),
             )
         )
 
@@ -139,6 +143,8 @@ data class TransferMetadata(
                     is Number -> v.toInt()
                     else -> 1
                 },
+                batchId = (data["batch_id"] as? String) ?: "",
+                relativePath = (data["relative_path"] as? String) ?: "",
             )
         }
 
@@ -185,5 +191,7 @@ data class TransferMetadata(
         put("sender_identity", senderIdentity)
         put("created_at", createdAt)
         put("protocol_version", protocolVersion)
+        put("batch_id", batchId)
+        put("relative_path", relativePath)
     }
 }

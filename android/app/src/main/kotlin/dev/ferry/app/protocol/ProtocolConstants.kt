@@ -40,6 +40,17 @@ object ProtocolConstants {
         const val TRANSFER_RESUME_REQUEST = "TRANSFER_RESUME_REQUEST"
         const val TRANSFER_RESUME_ACCEPT  = "TRANSFER_RESUME_ACCEPT"
         const val TRANSFER_RESUME_REJECT  = "TRANSFER_RESUME_REJECT"
+
+        // Phase 4C: Batch & Directory Transfers
+        const val BATCH_REQUEST = "BATCH_REQUEST"
+        const val BATCH_ACCEPT = "BATCH_ACCEPT"
+        const val BATCH_REJECT = "BATCH_REJECT"
+        const val BATCH_CANCEL = "BATCH_CANCEL"
+        const val BATCH_COMPLETE = "BATCH_COMPLETE"
+
+        // Clipboard Sync (MVP Final Sprint)
+        const val CLIPBOARD_SYNC = "CLIPBOARD_SYNC"
+        const val CLIPBOARD_SYNC_ACK = "CLIPBOARD_SYNC_ACK"
     }
 
     object ErrorCodes {

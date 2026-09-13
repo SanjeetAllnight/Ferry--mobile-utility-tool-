@@ -424,6 +424,24 @@ class DatabaseManager:
                 for row in cursor.fetchall()
             ]
 
+    def delete_interrupted_transfer(self, transfer_id: str) -> None:
+        """Remove a specific interrupted transfer record from the DB (set to FAILED)."""
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE transfer_history
+                SET status = 'FAILED',
+                    interrupted_at = NULL,
+                    bytes_received = NULL,
+                    resume_chunk_index = NULL,
+                    partial_sha256 = NULL,
+                    sender_identity = NULL,
+                    original_metadata_json = NULL,
+                    expire_at = NULL
+                WHERE transfer_id = ? AND status = 'INTERRUPTED'
+            """, (transfer_id,))
+            conn.commit()
+
     def expire_interrupted_transfers(self, now_ms: Optional[int] = None) -> int:
         """
         Delete .part metadata (set status→FAILED) for all INTERRUPTED transfers

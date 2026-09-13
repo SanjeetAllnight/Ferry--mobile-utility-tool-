@@ -27,6 +27,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var controlClient: FerryControlClient
 
     private val sharedUri = mutableStateOf<Uri?>(null)
+    private val sharedUris = mutableStateOf<List<Uri>>(emptyList())
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -51,7 +52,11 @@ class MainActivity : ComponentActivity() {
                     discoveryEngine = discoveryEngine,
                     controlClient = controlClient,
                     sharedUri = sharedUri.value,
-                    onSharedUriHandled = { sharedUri.value = null }
+                    sharedUris = sharedUris.value,
+                    onSharedUriHandled = {
+                        sharedUri.value = null
+                        sharedUris.value = emptyList()
+                    }
                 )
             }
         }
@@ -75,12 +80,24 @@ class MainActivity : ComponentActivity() {
         handleIntent(intent)
     }
 
+    @Suppress("DEPRECATION")
     private fun handleIntent(intent: Intent?) {
-        if (intent?.action == Intent.ACTION_SEND) {
-            val uri = intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
-            if (uri != null) {
-                Log.i(TAG, "Received ACTION_SEND with URI: $uri")
-                sharedUri.value = uri
+        when (intent?.action) {
+            Intent.ACTION_SEND -> {
+                val uri = intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
+                if (uri != null) {
+                    Log.i(TAG, "Received ACTION_SEND with URI: $uri")
+                    sharedUri.value = uri
+                    sharedUris.value = emptyList()
+                }
+            }
+            Intent.ACTION_SEND_MULTIPLE -> {
+                val uris = intent.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM)
+                if (!uris.isNullOrEmpty()) {
+                    Log.i(TAG, "Received ACTION_SEND_MULTIPLE with ${uris.size} URIs")
+                    sharedUris.value = uris
+                    sharedUri.value = null
+                }
             }
         }
     }

@@ -68,6 +68,7 @@ fun FerryApp(
     discoveryEngine: FerryDiscoveryEngine? = null,
     controlClient: FerryControlClient? = null,
     sharedUri: Uri? = null,
+    sharedUris: List<Uri> = emptyList(),
     onSharedUriHandled: () -> Unit = {},
 ) {
     val context = LocalContext.current
@@ -97,6 +98,19 @@ fun FerryApp(
     val interruptedTransfers by controlClient?.interruptedTransfers?.collectAsState()
         ?: remember { mutableStateOf(emptyList()) }
 
+    val remoteClipboard by controlClient?.remoteClipboard?.collectAsState()
+        ?: remember { mutableStateOf(null) }
+
+    // Clipboard sync: write remote clipboard to Android when it changes
+    LaunchedEffect(remoteClipboard) {
+        val text = remoteClipboard ?: return@LaunchedEffect
+        val cm = context.getSystemService(android.content.ClipboardManager::class.java)
+        cm?.setPrimaryClip(android.content.ClipData.newPlainText("Ferry Clipboard Sync", text))
+    }
+
+    // Clipboard sync toggle state
+    val clipboardSyncEnabled = remember { mutableStateOf(false) }
+
     val isEstablished = sessionState == FerrySession.State.ESTABLISHED
 
     val filePicker = rememberLauncherForActivityResult(
@@ -109,10 +123,49 @@ fun FerryApp(
         }
     }
 
+    val multipleFilePicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetMultipleContents()
+    ) { uris: List<Uri> ->
+        if (uris.isNotEmpty()) {
+            scope.launch {
+                val batchName = "Batch of ${uris.size} files"
+                controlClient?.sendBatch(uris, context, batchName)
+            }
+        }
+    }
+
+    val folderPicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            scope.launch {
+                val treeNode = androidx.documentfile.provider.DocumentFile.fromTreeUri(context, uri)
+                if (treeNode != null) {
+                    val batchName = treeNode.name ?: "Folder"
+                    val uris = mutableListOf<Uri>()
+                    // Full recursive SAF traversal — collects all files in all subdirectories
+                    collectUrisRecursively(treeNode, uris)
+                    if (uris.isNotEmpty()) {
+                        controlClient?.sendBatch(uris, context, batchName)
+                    }
+                }
+            }
+        }
+    }
+
     // Auto-send pending shared URI when connected
     LaunchedEffect(sharedUri, isEstablished) {
         if (sharedUri != null && isEstablished) {
             controlClient?.sendFile(sharedUri, context)
+            onSharedUriHandled()
+        }
+    }
+
+    // Auto-send multiple pending shared URIs as a batch when connected
+    LaunchedEffect(sharedUris, isEstablished) {
+        if (sharedUris.isNotEmpty() && isEstablished) {
+            val batchName = "Shared ${sharedUris.size} files"
+            controlClient?.sendBatch(sharedUris, context, batchName)
             onSharedUriHandled()
         }
     }
@@ -134,13 +187,25 @@ fun FerryApp(
         },
         floatingActionButton = {
             if (isEstablished) {
-                ExtendedFloatingActionButton(
-                    text = { Text("Send File") },
-                    icon = { Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send File") },
-                    onClick = { filePicker.launch("*/*") },
-                    containerColor = MaterialTheme.colorScheme.primary,
-                    contentColor = MaterialTheme.colorScheme.onPrimary,
-                )
+                Column(
+                    horizontalAlignment = Alignment.End,
+                    verticalArrangement = Arrangement.spacedBy(16.dp)
+                ) {
+                    ExtendedFloatingActionButton(
+                        text = { Text("Send Files") },
+                        icon = { Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send Files") },
+                        onClick = { multipleFilePicker.launch("*/*") },
+                        containerColor = MaterialTheme.colorScheme.primary,
+                        contentColor = MaterialTheme.colorScheme.onPrimary,
+                    )
+                    ExtendedFloatingActionButton(
+                        text = { Text("Send Folder") },
+                        icon = { Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send Folder") },
+                        onClick = { folderPicker.launch(null) },
+                        containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                        contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                    )
+                }
             }
         }
     ) { innerPadding ->
@@ -186,14 +251,20 @@ fun FerryApp(
                     }
 
                     Text(
-                        text = "Ferry — Phase 3C",
+                        text = "Ferry",
                         style = MaterialTheme.typography.headlineLarge,
                         color = MaterialTheme.colorScheme.onPrimaryContainer
                     )
 
                     val statusText = when {
-                        transferProgress != null ->
-                            "Sending: ${transferProgress!!.fileName} (${transferProgress!!.fraction.times(100).toInt()}%)"
+                        transferProgress != null -> {
+                            val pct = transferProgress!!.fraction.times(100).toInt()
+                            val batchInfo = transferProgress!!.batchInfo
+                            if (batchInfo != null)
+                                "Sending batch ${batchInfo.doneItems}/${batchInfo.totalItems}: ${transferProgress!!.fileName} ($pct%)"
+                            else
+                                "Sending: ${transferProgress!!.fileName} ($pct%)"
+                        }
                         incomingProgress != null ->
                             "Receiving: ${incomingProgress!!.fileName} (${incomingProgress!!.fraction.times(100).toInt()}%)"
                         else -> when (sessionState) {
@@ -409,6 +480,51 @@ fun FerryApp(
                     }
                 }
             }
+            // ── Clipboard Sync ─────────────────────────────────────────────
+            if (isEstablished) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.6f)
+                    )
+                ) {
+                    Row(
+                        modifier = Modifier.padding(16.dp).fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Clipboard Sync",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Text(
+                                text = "Sync text clipboard with ${connectedDevice?.deviceName ?: "peer"}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.7f)
+                            )
+                        }
+                        androidx.compose.material3.Switch(
+                            checked = clipboardSyncEnabled.value,
+                            onCheckedChange = { enabled ->
+                                clipboardSyncEnabled.value = enabled
+                                controlClient?.clipboardSyncEnabled = enabled
+                                if (enabled) {
+                                    // On enable, push current local clipboard to peer
+                                    val cm = context.getSystemService(android.content.ClipboardManager::class.java)
+                                    val clip = cm?.primaryClip?.getItemAt(0)?.text?.toString()
+                                    if (!clip.isNullOrEmpty()) {
+                                        controlClient?.sendClipboardSync(clip)
+                                    }
+                                }
+                            }
+                        )
+                    }
+                }
+            }
+
             if (sharedUri != null && !isEstablished) {
                 Card(
                     modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp),
@@ -426,6 +542,39 @@ fun FerryApp(
                         Column(modifier = Modifier.padding(start = 16.dp).weight(1f)) {
                             Text("Pending Share", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onTertiaryContainer)
                             Text("Connect to a device to send", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onTertiaryContainer)
+                        }
+                        TextButton(onClick = onSharedUriHandled) {
+                            Text("Cancel", color = MaterialTheme.colorScheme.onTertiaryContainer)
+                        }
+                    }
+                }
+            }
+
+            if (sharedUris.isNotEmpty() && !isEstablished) {
+                Card(
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(16.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.Send,
+                            contentDescription = "Pending Batch Share",
+                            tint = MaterialTheme.colorScheme.onTertiaryContainer
+                        )
+                        Column(modifier = Modifier.padding(start = 16.dp).weight(1f)) {
+                            Text(
+                                "Pending: ${sharedUris.size} files",
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onTertiaryContainer
+                            )
+                            Text(
+                                "Connect to a device to send",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onTertiaryContainer
+                            )
                         }
                         TextButton(onClick = onSharedUriHandled) {
                             Text("Cancel", color = MaterialTheme.colorScheme.onTertiaryContainer)
@@ -776,4 +925,21 @@ private fun formatBytes(bytes: Long): String {
         unit++
     }
     return "%.1f %s".format(value, units[unit])
+}
+
+/**
+ * Recursively collect all file URIs from a [androidx.documentfile.provider.DocumentFile] tree.
+ * Directories are traversed; symlinks and empty files are included naturally.
+ * Results are appended to [out] in breadth-first order.
+ */
+private fun collectUrisRecursively(
+    node: androidx.documentfile.provider.DocumentFile,
+    out: MutableList<Uri>,
+) {
+    for (child in node.listFiles()) {
+        when {
+            child.isDirectory -> collectUrisRecursively(child, out)
+            child.isFile -> out.add(child.uri)
+        }
+    }
 }

@@ -1,0 +1,13 @@
+[Desktop Entry]
+Name=Ferry
+GenericName=File Transfer
+Comment=Secure Android ↔ Linux file transfer over local Wi-Fi
+Exec=ferry
+Icon=applications-internet
+Terminal=false
+Type=Application
+Categories=Network;FileTransfer;GTK;
+Keywords=android;file;transfer;share;sync;
+StartupWMClass=Ferry
+StartupNotify=true
+MimeType=application/octet-stream;

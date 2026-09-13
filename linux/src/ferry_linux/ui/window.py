@@ -1,12 +1,14 @@
 """
-Ferry Main Application Window (GTK4 & Libadwaita) — Phase 3C.
+Ferry Main Application Window (GTK4 & Libadwaita) — MVP Completion Sprint.
 
-New in Phase 3C:
-  - "Send File" button in header bar (active when ≥1 ESTABLISHED session)
-  - Per-device "Send File" button on trusted device rows
-  - Active Transfers group with live progress bars (incoming and outgoing)
-  - Transfer History panel (last 20 transfers from DB)
-  - Incoming transfer progress bar replaces approval dialog during receipt
+New in MVP Completion Sprint:
+  - Drag-and-drop file/folder upload (text/uri-list drop target)
+  - Settings button in header bar
+  - Diagnostics expander showing session/identity/protocol info
+  - "Send Files" (multi-select) added alongside "Send Folder"
+  - ACTION_SEND_MULTIPLE share sheet support (Android side)
+  - Batch aggregate progress visible in status card
+  - Stale "Phase 3C" developer labels removed
 """
 
 from __future__ import annotations
@@ -55,6 +57,27 @@ class FerryMainWindow(Adw.ApplicationWindow):
         self._send_btn.connect("clicked", self._on_send_file_clicked)
         header_bar.pack_end(self._send_btn)
 
+        self._send_files_btn = Gtk.Button(label="Send Files")
+        self._send_files_btn.set_icon_name("edit-copy-symbolic")
+        self._send_files_btn.set_sensitive(False)
+        self._send_files_btn.set_tooltip_text("Send multiple files to a connected device")
+        self._send_files_btn.connect("clicked", self._on_send_multiple_files_clicked)
+        header_bar.pack_end(self._send_files_btn)
+
+        self._send_dir_btn = Gtk.Button(label="Send Folder")
+        self._send_dir_btn.set_icon_name("folder-new-symbolic")
+        self._send_dir_btn.set_sensitive(False)
+        self._send_dir_btn.set_tooltip_text("Send a folder (batch) to a connected device")
+        self._send_dir_btn.connect("clicked", self._on_send_dir_clicked)
+        header_bar.pack_end(self._send_dir_btn)
+
+        # Settings button
+        settings_btn = Gtk.Button()
+        settings_btn.set_icon_name("preferences-system-symbolic")
+        settings_btn.set_tooltip_text("Ferry Settings")
+        settings_btn.connect("clicked", self._on_settings_clicked)
+        header_bar.pack_start(settings_btn)
+
         # ── Scrolled container ────────────────────────────────────────────
         scrolled = Gtk.ScrolledWindow()
         scrolled.set_vexpand(True)
@@ -72,8 +95,8 @@ class FerryMainWindow(Adw.ApplicationWindow):
         self.status_page.set_icon_name("network-wireless-symbolic")
         self.status_page.set_title("Ferry")
         self.status_page.set_description(
-            "Local Android ↔ Arch Linux File Transfer\n"
-            "Phase 3C: Full Transfer UI Active"
+            "Local Android ↔ Linux File Transfer\n"
+            "Open Ferry on your Android phone to connect"
         )
         content_box.append(self.status_page)
 
@@ -129,8 +152,60 @@ class FerryMainWindow(Adw.ApplicationWindow):
         content_box.append(self.history_group)
         self._history_rows: list = []
 
+        # ── Clipboard Sync row in System Status ───────────────────────────
+        self._clipboard_switch = Gtk.Switch()
+        self._clipboard_switch.set_valign(Gtk.Align.CENTER)
+        self._clipboard_switch.connect("state-set", self._on_clipboard_switch_changed)
+        clipboard_row = Adw.ActionRow()
+        clipboard_row.set_title("Clipboard Sync")
+        clipboard_row.set_subtitle("Sync text clipboard with trusted peer")
+        clipboard_row.set_icon_name("edit-paste-symbolic")
+        clipboard_row.add_suffix(self._clipboard_switch)
+        clipboard_row.set_activatable_widget(self._clipboard_switch)
+        pref_group.add(clipboard_row)
+
+        # ── Diagnostics (collapsible) ──────────────────────────────
+        diag_row = Adw.ExpanderRow()
+        diag_row.set_title("Diagnostics")
+        diag_row.set_subtitle("Identity, session, and protocol details")
+        diag_row.set_icon_name("system-search-symbolic")
+        pref_group.add(diag_row)
+
+        self._diag_identity_row = Adw.ActionRow()
+        self._diag_identity_row.set_title("Local Identity")
+        self._diag_identity_row.set_subtitle("—")
+        diag_row.add_row(self._diag_identity_row)
+
+        self._diag_peer_row = Adw.ActionRow()
+        self._diag_peer_row.set_title("Connected Peer")
+        self._diag_peer_row.set_subtitle("Not connected")
+        diag_row.add_row(self._diag_peer_row)
+
+        self._diag_mdns_row = Adw.ActionRow()
+        self._diag_mdns_row.set_title("mDNS Status")
+        self._diag_mdns_row.set_subtitle("_ferry._tcp active")
+        diag_row.add_row(self._diag_mdns_row)
+
+        # ── Drag-and-Drop target on scrolled window ────────────────
+        drop_target = Gtk.DropTarget.new(type=None, actions=Gtk.DragAction.COPY)
+        drop_target.set_gtypes([type(None)])
+        # Accept text/uri-list DND drops
+        try:
+            import gi
+            from gi.repository import Gdk
+            drop_target = Gtk.DropTarget.new(Gdk.FileList, Gtk.DragAction.COPY)
+            drop_target.connect("accept", self._on_drop_accept)
+            drop_target.connect("drop", self._on_drop)
+            drop_target.connect("enter", self._on_drop_enter)
+            drop_target.connect("leave", self._on_drop_leave)
+            scrolled.add_controller(drop_target)
+        except Exception as exc:
+            import logging
+            logging.getLogger("ferry.ui").debug("DnD setup skipped: %s", exc)
+
         GLib.idle_add(self._update_trusted_devices)
         GLib.idle_add(self._update_transfer_history)
+        GLib.idle_add(self._update_diagnostics)
 
     # ── Trusted Devices ───────────────────────────────────────────────────────
 
@@ -277,11 +352,25 @@ class FerryMainWindow(Adw.ApplicationWindow):
             if dlg:
                 dlg.close()
 
+            # Enable send buttons
+            self._send_btn.set_sensitive(True)
+            self._send_files_btn.set_sensitive(True)
+            self._send_dir_btn.set_sensitive(True)
+            GLib.idle_add(self._update_diagnostics)
+
         if state in (SessionState.FAILED, SessionState.DISCONNECTED, SessionState.CLOSING):
             self._update_trusted_devices()
             dlg = self._pairing_dialogs.pop(remote_addr, None)
             if dlg:
                 dlg.close()
+
+            # Disable send buttons if no established sessions left
+            has_established = len(app.service.established_sessions) > 0
+            self._send_btn.set_sensitive(has_established)
+            self._send_files_btn.set_sensitive(has_established)
+            self._send_dir_btn.set_sensitive(has_established)
+            GLib.idle_add(self._update_diagnostics)
+            
             # Phase 3D: Clear any stuck active transfer rows when connection drops
             stuck = list(self._active_transfer_rows.keys())
             for stuck_tid in stuck:
@@ -606,6 +695,18 @@ class FerryMainWindow(Adw.ApplicationWindow):
 
     # ── Send File ─────────────────────────────────────────────────────────────
 
+    def on_peers_updated(self) -> None:
+        """Update peer list when discovery or session state changes."""
+        app = self.get_application()
+        if not app or not app.service:
+            return
+
+        # Enable send buttons if we have at least one ESTABLISHED session
+        has_established = len(app.service.established_sessions) > 0
+        self._send_btn.set_sensitive(has_established)
+        self._send_files_btn.set_sensitive(has_established)
+        self._send_dir_btn.set_sensitive(has_established)
+
     def _on_send_file_clicked(self, _btn) -> None:
         """Send File header button: pick the first ESTABLISHED peer."""
         app = self.get_application()
@@ -616,6 +717,88 @@ class FerryMainWindow(Adw.ApplicationWindow):
             return
         remote_addr = next(iter(established))
         self._launch_file_dialog(remote_addr)
+
+    def _on_send_multiple_files_clicked(self, _btn) -> None:
+        """Send Files (multiple) header button — opens a multi-select file dialog."""
+        app = self.get_application()
+        if not app or not app.service:
+            return
+        established = app.service.established_sessions
+        if not established:
+            return
+        remote_addr = next(iter(established))
+        self._launch_multiple_file_dialog(remote_addr)
+
+    def _launch_multiple_file_dialog(self, remote_addr: Optional[str]) -> None:
+        """Open a multi-select GTK4 file-chooser and send chosen files as a batch."""
+        if not remote_addr:
+            return
+        dialog = Gtk.FileDialog()
+        dialog.set_title("Choose files to send")
+        dialog.open_multiple(self, None, self._on_multiple_files_chosen, remote_addr)
+
+    def _on_multiple_files_chosen(
+        self, dialog: Gtk.FileDialog, result, remote_addr: str
+    ) -> None:
+        """Callback from Gtk.FileDialog.open_multiple()."""
+        try:
+            gfiles = dialog.open_multiple_finish(result)
+        except Exception:
+            return  # User cancelled
+        if not gfiles:
+            return
+
+        paths: list[Path] = []
+        for i in range(gfiles.get_n_items()):
+            gfile = gfiles.get_item(i)
+            p = Path(gfile.get_path())
+            if p.is_file():
+                paths.append(p)
+
+        if not paths:
+            return
+
+        app = self.get_application()
+        if not app or not app.service or not app.get_loop():
+            return
+
+        batch_name = f"{len(paths)} files"
+
+        async def _do_send_batch():
+            try:
+                success = await app.service.send_batch(remote_addr, paths, batch_name)
+                msg = f"Sent {len(paths)} files" if success else f"Batch send failed"
+                GLib.idle_add(self._show_error_toast, msg)
+            except Exception as exc:
+                GLib.idle_add(self._show_error_toast, f"Batch error: {exc}")
+
+        asyncio.run_coroutine_threadsafe(_do_send_batch(), app.get_loop())
+
+    def _on_settings_clicked(self, _btn) -> None:
+        """Open a simple settings dialog showing current config."""
+        app = self.get_application()
+        config = None
+        if app and app.service:
+            config = app.service.config
+
+        if config:
+            body = (
+                f"Device Name: {config.device_name}\n"
+                f"Listen Port: {config.listen_port}\n"
+                f"Download Directory: {config.download_dir}\n"
+                f"Auto-Accept Paired: {config.auto_accept_paired}"
+            )
+        else:
+            body = "Service not yet started."
+
+        dialog = Adw.MessageDialog(
+            transient_for=self,
+            heading="Ferry Settings",
+            body=body,
+        )
+        dialog.add_response("ok", "OK")
+        dialog.present()
+
 
     def _launch_file_dialog(self, remote_addr: Optional[str]) -> None:
         """Open a GTK4 file-chooser dialog and, on success, send the chosen file."""
@@ -666,6 +849,58 @@ class FerryMainWindow(Adw.ApplicationWindow):
 
         asyncio.run_coroutine_threadsafe(_do_send(), app.get_loop())
 
+    def _on_send_dir_clicked(self, _btn) -> None:
+        """Send Folder header button: pick the first ESTABLISHED peer."""
+        app = self.get_application()
+        if not app or not app.service:
+            return
+        established = app.service.established_sessions
+        if not established:
+            return
+        remote_addr = next(iter(established))
+        
+        dialog = Gtk.FileDialog()
+        dialog.set_title("Choose a folder to send")
+        dialog.select_multiple_folders(self, None, self._on_folder_chosen, remote_addr)
+
+    def _on_folder_chosen(self, dialog: Gtk.FileDialog, result, remote_addr: str) -> None:
+        """Callback from Gtk.FileDialog.select_multiple_folders()."""
+        try:
+            gfiles = dialog.select_multiple_folders_finish(result)
+        except Exception:
+            return  # User cancelled or error
+
+        if not gfiles:
+            return
+
+        paths = []
+        for i in range(gfiles.get_n_items()):
+            gfile = gfiles.get_item(i)
+            paths.append(Path(gfile.get_path()))
+
+        if not paths:
+            return
+
+        app = self.get_application()
+        if not app or not app.service or not app.get_loop():
+            return
+
+        batch_name = paths[0].name
+        if len(paths) > 1:
+            batch_name += f" and {len(paths) - 1} others"
+
+        async def _do_send_batch():
+            try:
+                success = await app.service.send_batch(remote_addr, paths, batch_name)
+                msg = f"Batch '{batch_name}' sent successfully" if success else f"Batch '{batch_name}' failed"
+                GLib.idle_add(self._show_error_toast, msg)
+            except Exception as exc:
+                print(f"Batch send error: {exc}")
+                GLib.idle_add(self._show_error_toast, f"Batch error: {exc}")
+
+        # Fire and forget the async task
+        asyncio.run_coroutine_threadsafe(_do_send_batch(), app.get_loop())
+
     # ── Toast helpers ─────────────────────────────────────────────────────────
 
     def _show_error_toast(self, message: str) -> None:
@@ -686,3 +921,169 @@ class FerryMainWindow(Adw.ApplicationWindow):
                 return f"{size_bytes:.1f} {unit}"
             size_bytes /= 1024.0
         return f"{size_bytes:.1f} TB"
+
+    # ── Clipboard Sync ────────────────────────────────────────────────────────
+
+    def _on_clipboard_switch_changed(self, switch: Gtk.Switch, state: bool) -> bool:
+        """Enable/disable clipboard sync in the service."""
+        app = self.get_application()
+        if app and app.service:
+            app.service.clipboard_sync.set_enabled(state)
+            if state:
+                # Wire the write-local callback (GTK clipboard write)
+                app.service.clipboard_sync.set_on_write_local_callback(
+                    self._write_clipboard_text
+                )
+                # Start polling local clipboard
+                self._start_clipboard_polling()
+        return False  # don't prevent switch state change
+
+    def _write_clipboard_text(self, text: str) -> None:
+        """Write text to the local GTK clipboard."""
+        try:
+            clipboard = self.get_clipboard()
+            clipboard.set(text)
+        except Exception as exc:
+            import logging
+            logging.getLogger("ferry.ui").debug("Failed to write clipboard: %s", exc)
+
+    def _start_clipboard_polling(self) -> None:
+        """Poll the GTK clipboard every 1.5 s and forward changes to peers."""
+        self._last_polled_clipboard: str = ""
+
+        def _poll():
+            app = self.get_application()
+            if not app or not app.service:
+                return False
+            if not app.service.clipboard_sync.enabled:
+                return False  # Stop polling if disabled
+
+            # Read clipboard asynchronously
+            clipboard = self.get_clipboard()
+            clipboard.read_text_async(None, self._on_clipboard_read_done)
+            return True  # keep polling
+
+        GLib.timeout_add(1500, _poll)
+
+    def _on_clipboard_read_done(self, clipboard, result) -> None:
+        """Callback when clipboard text is available."""
+        try:
+            text = clipboard.read_text_finish(result)
+        except Exception:
+            return
+        if not text or text == getattr(self, "_last_polled_clipboard", ""):
+            return
+        self._last_polled_clipboard = text
+
+        app = self.get_application()
+        if not app or not app.service or not app.service.clipboard_sync.enabled:
+            return
+
+        # Forward to all established peers
+        established = app.service.established_sessions
+        for peer_id in list(established.keys()):
+            import asyncio
+            asyncio.run_coroutine_threadsafe(
+                app.service.clipboard_sync.on_local_clipboard_changed(text, peer_id),
+                app.get_loop(),
+            )
+
+    # ── Drag-and-Drop handlers ────────────────────────────────────────────────
+
+    def _on_drop_accept(self, drop_target, drop) -> bool:
+        """Accept DnD drops that carry file lists."""
+        return True
+
+    def _on_drop_enter(self, drop_target, x, y) -> None:
+        """Visual feedback: highlight the window when something is dragged over."""
+        self.add_css_class("drop-target-active")
+
+    def _on_drop_leave(self, drop_target) -> None:
+        """Remove DnD highlight on drag leave."""
+        self.remove_css_class("drop-target-active")
+
+    def _on_drop(self, drop_target, value, x, y) -> bool:
+        """Handle a completed DnD drop of a Gdk.FileList."""
+        self.remove_css_class("drop-target-active")
+        app = self.get_application()
+        if not app or not app.service or not app.get_loop():
+            return False
+
+        established = app.service.established_sessions
+        if not established:
+            self._show_error_toast("No connected device \u2014 connect to a peer first to drop files")
+            return False
+
+        remote_addr = next(iter(established))
+
+        # value is a Gdk.FileList; convert to Path list
+        try:
+            from gi.repository import Gdk
+            if isinstance(value, Gdk.FileList):
+                files = value.get_files()
+            else:
+                return False
+        except Exception as exc:
+            import logging
+            logging.getLogger("ferry.ui").warning("DnD value error: %s", exc)
+            return False
+
+        paths = [Path(f.get_path()) for f in files if f.get_path()]
+        if not paths:
+            return False
+
+        if len(paths) == 1 and paths[0].is_file():
+            # Single file \u2014 send directly
+            file_path = paths[0]
+            file_size = file_path.stat().st_size
+            import uuid as _uuid
+            transfer_id = str(_uuid.uuid4())
+            self._add_transfer_row(transfer_id, file_path.name, file_size, direction="\u2191")
+
+            async def _send():
+                success = await app.service.send_file(remote_addr, file_path, transfer_id=transfer_id)
+                GLib.idle_add(self.handle_transfer_complete, transfer_id, success, file_path.name, "OUTGOING")
+
+            asyncio.run_coroutine_threadsafe(_send(), app.get_loop())
+        else:
+            # Multiple files or a folder \u2014 use batch
+            batch_name = paths[0].name if len(paths) == 1 else f"{len(paths)} dropped items"
+
+            async def _send_batch():
+                success = await app.service.send_batch(remote_addr, paths, batch_name)
+                GLib.idle_add(
+                    self._show_error_toast,
+                    f"Batch sent: {batch_name}" if success else f"Batch failed: {batch_name}",
+                )
+
+            asyncio.run_coroutine_threadsafe(_send_batch(), app.get_loop())
+
+        return True
+
+    # ── Diagnostics ───────────────────────────────────────────────────────────
+
+    def _update_diagnostics(self) -> bool:
+        """Populate the diagnostics expander rows from the live service state."""
+        app = self.get_application()
+        if not app or not app.service:
+            return False
+
+        try:
+            identity_key = app.service.identity.public_key_b64
+            self._diag_identity_row.set_subtitle(
+                identity_key[:24] + "\u2026" if len(identity_key) > 24 else identity_key
+            )
+        except Exception:
+            pass
+
+        established = app.service.established_sessions
+        if established:
+            addr, ps = next(iter(established.items()))
+            peer_name = ps.remote_device_name or "Unknown"
+            peer_state = ps.state.name if hasattr(ps, "state") and ps.state else "ESTABLISHED"
+            self._diag_peer_row.set_subtitle(f"{peer_name} \u2014 {addr} ({peer_state})")
+        else:
+            self._diag_peer_row.set_subtitle("Not connected")
+
+        return False
+

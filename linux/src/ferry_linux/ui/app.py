@@ -32,6 +32,11 @@ class FerryApplication(Adw.Application):
             self.window = FerryMainWindow(application=self)
             self._start_service()
         self.window.present()
+        # If --send was used on the command line, fire the deferred send callback
+        pending_cb = getattr(self, '_pending_send_callback', None)
+        if pending_cb:
+            self._pending_send_callback = None
+            pending_cb()
 
     def do_open(self, files: list, n_files: int, hint: str) -> None:
         """Handle files passed via command line (or D-Bus)."""
@@ -47,6 +52,8 @@ class FerryApplication(Adw.Application):
         import asyncio
 
         self.service = FerryService()
+        # Wire notification manager with the Gio.Application reference
+        self.service.notifications._app = self
         self.service.discovery.add_listener(self._on_devices_changed)
         self.service.add_session_listener(self._on_session_changed)
         self.service.add_transfer_request_listener(self._on_transfer_request)

@@ -145,6 +145,14 @@ def _transfer_transition(current: TransferState, new: TransferState) -> Transfer
         )
     return new
 
+class BatchState(Enum):
+    REQUESTED = auto()
+    ACCEPTED = auto()
+    TRANSFERRING = auto()
+    COMPLETED = auto()
+    FAILED = auto()
+    CANCELLED = auto()
+    PARTIAL = auto()
 
 # ─── Data classes ──────────────────────────────────────────────────────────────
 
@@ -164,6 +172,8 @@ class TransferMetadata:
     sender_identity: str     # sender's Ed25519 public key (base64url)
     created_at: int          # ms since epoch
     protocol_version: int = 1
+    batch_id: str = ""       # If non-empty, transfer belongs to this batch
+    relative_path: str = ""  # If non-empty, relative directory path within the batch
 
     @classmethod
     def from_dict(cls, data: dict) -> "TransferMetadata":
@@ -176,6 +186,15 @@ class TransferMetadata:
         file_name = sanitise_filename(raw_name)
         if not file_name:
             raise ValueError(f"Empty or invalid file_name after sanitisation: {raw_name!r}")
+
+        # Phase 4C: Extract and strictly validate relative_path
+        relative_path = str(data.get("relative_path", ""))
+        if relative_path:
+            import os
+            norm_path = os.path.normpath(relative_path)
+            if norm_path.startswith("/") or norm_path.startswith("\\") or norm_path.startswith("..") or "/../" in norm_path or "\\..\\" in norm_path:
+                raise ValueError(f"Path traversal detected in relative_path: {relative_path!r}")
+            relative_path = norm_path
 
         file_size = int(data["file_size"])
         if file_size < 0:
@@ -210,6 +229,8 @@ class TransferMetadata:
             sender_identity=str(data.get("sender_identity", "")),
             created_at=int(data.get("created_at", int(time.time() * 1000))),
             protocol_version=int(data.get("protocol_version", 1)),
+            batch_id=str(data.get("batch_id", "")),
+            relative_path=relative_path,
         )
 
     def to_dict(self) -> dict:
@@ -224,6 +245,8 @@ class TransferMetadata:
             "sender_identity": self.sender_identity,
             "created_at": self.created_at,
             "protocol_version": self.protocol_version,
+            "batch_id": self.batch_id,
+            "relative_path": self.relative_path,
         }
 
 
@@ -334,16 +357,26 @@ def sanitise_filename(raw: str) -> str:
     return name
 
 
-def resolve_safe_destination(staging_dir: Path, file_name: str) -> Path:
+def resolve_safe_destination(staging_dir: Path, file_name: str, relative_path: str = "") -> Path:
     """
     Resolve the safe staging destination for a received file.
+    If relative_path is provided, it is used to reconstruct the directory structure.
 
     Raises SecurityError if the resolved path escapes staging_dir.
     """
     sanitised = sanitise_filename(file_name)
     if not sanitised:
         raise ValueError(f"Cannot resolve safe destination for {file_name!r}")
-    dest = (staging_dir / sanitised).resolve()
+        
+    if relative_path:
+        norm_rel = os.path.normpath(relative_path)
+        if norm_rel.startswith("/") or norm_rel.startswith("\\") or norm_rel.startswith("..") or "/../" in norm_rel or "\\..\\" in norm_rel:
+            raise SecurityError(f"Path traversal detected in relative_path {relative_path!r}")
+        # Build destination with relative path
+        dest = (staging_dir / norm_rel).resolve()
+    else:
+        dest = (staging_dir / sanitised).resolve()
+        
     staging_resolved = staging_dir.resolve()
     if not str(dest).startswith(str(staging_resolved) + os.sep) and dest != staging_resolved:
         raise SecurityError(f"Path traversal detected for {file_name!r} → {dest}")
@@ -411,7 +444,11 @@ class IncomingTransfer:
             self._download_dir.mkdir(parents=True, exist_ok=True)
             temp_name = f"{self.meta.transfer_id}.part"
             self._temp_path = staging_dir / temp_name
-            self._final_path = resolve_safe_destination(self._download_dir, self.meta.file_name)
+            self._final_path = resolve_safe_destination(self._download_dir, self.meta.file_name, self.meta.relative_path)
+            
+            # Phase 4C: create parent directories if relative_path was used
+            self._final_path.parent.mkdir(parents=True, exist_ok=True)
+            
             self._temp_fh = open(self._temp_path, "wb")
         except OSError as exc:
             logger.error(
@@ -886,10 +923,14 @@ class OutgoingTransfer:
         source_path: Path,
         receiver_identity: str,
         transfer_id: Optional[str] = None,
+        batch_id: str = "",
+        relative_path: str = "",
     ) -> None:
         self.transfer_id = transfer_id or str(uuid.uuid4())
         self._source_path = source_path
         self._receiver_identity = receiver_identity
+        self.batch_id = batch_id
+        self.relative_path = relative_path
         self._state = TransferState.IDLE
         self._bytes_sent: int = 0
         self._cancelled = False
@@ -929,6 +970,8 @@ class OutgoingTransfer:
             chunk_count=chunk_count,
             sender_identity=sender_identity,
             created_at=int(time.time() * 1000),
+            batch_id=self.batch_id,
+            relative_path=self.relative_path,
         )
 
     async def stream_chunks(self) -> AsyncIterator[bytes]:
@@ -1054,3 +1097,28 @@ def _guess_mime_type(path: Path) -> str:
     import mimetypes
     mime, _ = mimetypes.guess_type(str(path))
     return mime or "application/octet-stream"
+
+# ─── Batch Transfer Classes (Phase 4C) ──────────────────────────────────────────
+
+class BatchIncomingTransfer:
+    def __init__(self, batch_id: str, batch_name: str, total_items: int, total_bytes: int):
+        self.batch_id = batch_id
+        self.batch_name = batch_name
+        self.total_items = total_items
+        self.total_bytes = total_bytes
+        self.state = BatchState.REQUESTED
+        self.items_completed = 0
+        self.items_failed = 0
+        self.bytes_transferred = 0
+
+class BatchOutgoingTransfer:
+    def __init__(self, batch_id: str, batch_name: str, total_items: int, total_bytes: int, paths: list[Path]):
+        self.batch_id = batch_id
+        self.batch_name = batch_name
+        self.total_items = total_items
+        self.total_bytes = total_bytes
+        self.paths = paths
+        self.state = BatchState.REQUESTED
+        self.items_completed = 0
+        self.items_failed = 0
+        self.bytes_transferred = 0

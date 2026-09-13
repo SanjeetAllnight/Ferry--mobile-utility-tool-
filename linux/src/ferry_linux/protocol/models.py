@@ -53,6 +53,17 @@ class MessageType(str, Enum):
     TRANSFER_RESUME_ACCEPT = "TRANSFER_RESUME_ACCEPT"    # sender → receiver: accept resume
     TRANSFER_RESUME_REJECT = "TRANSFER_RESUME_REJECT"    # sender → receiver: reject resume
 
+    # Multi-File / Directory Batch Transfers (Phase 4C)
+    BATCH_REQUEST = "BATCH_REQUEST"          # sender → receiver: batch metadata
+    BATCH_ACCEPT = "BATCH_ACCEPT"            # receiver → sender: accept batch
+    BATCH_REJECT = "BATCH_REJECT"            # receiver → sender: reject batch
+    BATCH_CANCEL = "BATCH_CANCEL"            # either direction: abort batch
+    BATCH_COMPLETE = "BATCH_COMPLETE"        # sender → receiver: all items sent
+
+    # Clipboard Sync (MVP Final Sprint)
+    CLIPBOARD_SYNC = "CLIPBOARD_SYNC"        # either direction: push text clipboard to peer
+    CLIPBOARD_SYNC_ACK = "CLIPBOARD_SYNC_ACK"  # optional acknowledgement
+
 
 @dataclass
 class TransferRequestPayload:
@@ -70,6 +81,8 @@ class TransferRequestPayload:
     sender_identity: str  # base64url Ed25519 public key
     created_at: int       # ms epoch
     protocol_version: int = PROTOCOL_VERSION
+    batch_id: str = ""    # If non-empty, belongs to a batch
+    relative_path: str = "" # If non-empty, relative path within batch/directory
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -87,6 +100,8 @@ class TransferRequestPayload:
             sender_identity=str(data.get("sender_identity", "")),
             created_at=int(data.get("created_at", 0)),
             protocol_version=int(data.get("protocol_version", PROTOCOL_VERSION)),
+            batch_id=str(data.get("batch_id", "")),
+            relative_path=str(data.get("relative_path", "")),
         )
 
 
@@ -143,6 +158,64 @@ class TransferResultPayload:
     success: bool
     sha256: str      # hex SHA-256 computed by receiver
     error: str = "" # human-readable error if success=False
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+# ── Phase 4C Batch Protocol Models ────────────────────────────────────────
+
+@dataclass
+class BatchRequestPayload:
+    batch_id: str
+    batch_name: str
+    total_items: int
+    total_bytes: int      # -1 if indeterminate
+    sender_identity: str
+    created_at: int
+    protocol_version: int = PROTOCOL_VERSION
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "BatchRequestPayload":
+        return cls(
+            batch_id=str(data["batch_id"]),
+            batch_name=str(data["batch_name"]),
+            total_items=int(data["total_items"]),
+            total_bytes=int(data["total_bytes"]),
+            sender_identity=str(data.get("sender_identity", "")),
+            created_at=int(data.get("created_at", 0)),
+            protocol_version=int(data.get("protocol_version", PROTOCOL_VERSION)),
+        )
+
+@dataclass
+class BatchAcceptPayload:
+    batch_id: str
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+@dataclass
+class BatchRejectPayload:
+    batch_id: str
+    reason: str
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+@dataclass
+class BatchCancelPayload:
+    batch_id: str
+    reason: str = "USER_CANCELLED"
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+@dataclass
+class BatchCompletePayload:
+    batch_id: str
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

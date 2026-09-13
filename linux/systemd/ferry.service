@@ -1,0 +1,22 @@
+[Unit]
+Description=Ferry — Android ↔ Linux File Transfer Daemon
+Documentation=https://github.com/user/Ferry
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Run the core service in headless daemon mode (no UI)
+ExecStart=%h/.local/bin/ferry --service
+Restart=on-failure
+RestartSec=5
+# Log to systemd journal
+StandardOutput=journal
+StandardError=journal
+# Environment: ensure the user bus is available
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%U/bus
+# Resource limits
+MemoryMax=256M
+
+[Install]
+WantedBy=default.target

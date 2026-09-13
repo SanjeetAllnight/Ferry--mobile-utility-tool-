@@ -14,6 +14,7 @@ import dev.ferry.app.transfer.FerryTransferReceiver
 import dev.ferry.app.transfer.InterruptedTransferStore
 import dev.ferry.app.transfer.TransferMetadata
 import dev.ferry.app.transfer.TransferState
+import dev.ferry.app.service.FerryTransferService
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -75,12 +76,22 @@ class FerryControlClient(
         val bytesDone: Long,
         val totalBytes: Long,
         val direction: Direction,
+        /** Non-null during a batch transfer; null for single-file transfers. */
+        val batchInfo: BatchInfo? = null,
     ) {
         enum class Direction { OUTGOING, INCOMING }
 
         val fraction: Float get() =
             if (totalBytes > 0) (bytesDone.toFloat() / totalBytes).coerceIn(0f, 1f) else (if (bytesDone >= totalBytes) 1f else 0f)
     }
+
+    /** Aggregate context for a batch transfer shown in the progress UI. */
+    data class BatchInfo(
+        val batchId: String,
+        val batchName: String,
+        val doneItems: Int,
+        val totalItems: Int,
+    )
 
     // ── Transfer history entry ────────────────────────────────────────────────
 
@@ -122,6 +133,17 @@ class FerryControlClient(
     private val _interruptedTransfers = MutableStateFlow<List<InterruptedTransferStore.InterruptedRecord>>(emptyList())
     val interruptedTransfers: StateFlow<List<InterruptedTransferStore.InterruptedRecord>> = _interruptedTransfers.asStateFlow()
 
+    /** Clipboard sync: latest text received from the remote peer (null = nothing yet). */
+    private val _remoteClipboard = MutableStateFlow<String?>(null)
+    val remoteClipboard: StateFlow<String?> = _remoteClipboard.asStateFlow()
+
+    /** Whether clipboard sync is enabled by the user. */
+    @Volatile var clipboardSyncEnabled: Boolean = false
+    /** Last text pushed *to* the peer — loop guard. */
+    @Volatile private var lastClipboardSent: String = ""
+    /** Last text received *from* the peer — loop guard. */
+    @Volatile private var lastClipboardReceived: String = ""
+
     // ── Internal state ────────────────────────────────────────────────────────
 
     private var pendingPeerId: String? = null
@@ -145,6 +167,7 @@ class FerryControlClient(
 
     // CompletableDeferred for TRANSFER_ACCEPT/REJECT: resolved by the session loop
     @Volatile private var pendingTransferAccept: CompletableDeferred<Boolean>? = null
+    @Volatile private var pendingBatchAccept: CompletableDeferred<Boolean>? = null
 
     // Cancellation signals for active transfers
     private val outgoingCancelled = java.util.concurrent.atomic.AtomicBoolean(false)
@@ -160,6 +183,16 @@ class FerryControlClient(
     @Volatile private var pendingResumeAccept: CompletableDeferred<Boolean>? = null
     // Phase 3E: peer static key at the time the session was established (for interrupt records)
     @Volatile private var connectedPeerStaticB64: String? = null
+
+    // Phase 4C: active incoming batch tracking
+    @Volatile private var activeBatchId: String? = null
+    @Volatile private var activeBatchItemsReceived: Int = 0
+    @Volatile private var activeBatchTotalItems: Int = 0
+
+    // Phase 4C: active outgoing batch tracking (for progress overlay)
+    @Volatile private var activeBatchName: String = ""
+    @Volatile private var activeBatchTotalItemsOut: Int = 0
+    @Volatile private var activeBatchSentItems: Int = 0
 
     // ── Public API ────────────────────────────────────────────────────────────
 
@@ -573,6 +606,23 @@ class FerryControlClient(
             ProtocolConstants.MessageTypes.TRANSFER_COMPLETE -> {
                 onTransferComplete(sess, output, transferId)
             }
+            
+            // Phase 4C: Batch Handlers
+            ProtocolConstants.MessageTypes.BATCH_REQUEST -> {
+                onBatchRequest(sess, output, payload)
+            }
+            ProtocolConstants.MessageTypes.BATCH_ACCEPT -> {
+                pendingBatchAccept?.complete(true)
+            }
+            ProtocolConstants.MessageTypes.BATCH_REJECT -> {
+                pendingBatchAccept?.complete(false)
+            }
+            ProtocolConstants.MessageTypes.BATCH_CANCEL -> {
+                onBatchCancel(sess, output, payload.optString("batch_id", ""))
+            }
+            ProtocolConstants.MessageTypes.BATCH_COMPLETE -> {
+                onBatchComplete(sess, output, payload.optString("batch_id", ""))
+            }
             ProtocolConstants.MessageTypes.TRANSFER_CANCEL -> {
                 val tid = payload.optString("transfer_id", "")
                 Log.i(TAG, "TRANSFER_CANCEL received for ${tid.take(8)}")
@@ -697,16 +747,132 @@ class FerryControlClient(
                 pendingResumeAccept = null
             }
 
+            ProtocolConstants.MessageTypes.CLIPBOARD_SYNC -> {
+                onClipboardSync(payload)
+            }
+
+            ProtocolConstants.MessageTypes.CLIPBOARD_SYNC_ACK -> { /* no-op */ }
+
             else -> Log.w(TAG, "Unhandled transfer message type: $type")
+        }
+    }
+
+    // ── Clipboard Sync ────────────────────────────────────────────────────────
+
+    /**
+     * Handle an incoming CLIPBOARD_SYNC message from the peer.
+     * Exposes the text via [remoteClipboard] flow; the UI layer is
+     * responsible for writing it to the Android ClipboardManager.
+     */
+    private fun onClipboardSync(payload: JSONObject) {
+        if (!clipboardSyncEnabled) return
+        val text = payload.optString("text", "")
+        if (text.isEmpty() || text == lastClipboardReceived) return
+        if (text.toByteArray(Charsets.UTF_8).size > 524_288) {
+            Log.w(TAG, "Incoming clipboard too large — discarding")
+            return
+        }
+        lastClipboardReceived = text
+        lastClipboardSent = text   // loop guard: don't echo back
+        _remoteClipboard.value = text
+        Log.d(TAG, "Clipboard sync received (${text.length} chars)")
+    }
+
+    /**
+     * Push [text] to the connected peer as a CLIPBOARD_SYNC message.
+     * No-op if clipboard sync is disabled, text is empty, identical to the
+     * last text we sent, or the same text we just received (loop guard).
+     */
+    fun sendClipboardSync(text: String) {
+        if (!clipboardSyncEnabled) return
+        if (text.isEmpty()) return
+        if (text.toByteArray(Charsets.UTF_8).size > 524_288) return
+        if (text == lastClipboardSent) return
+        if (text == lastClipboardReceived) return  // loop guard
+        val sess = session ?: return
+        val out  = activeOutput ?: return
+        lastClipboardSent = text
+        scope.launch {
+            try {
+                val payload = JSONObject().apply {
+                    put("text", text)
+                    put("ts", System.currentTimeMillis())
+                }
+                withContext(Dispatchers.IO) {
+                    sendEncryptedMessage(sess, out, ProtocolConstants.MessageTypes.CLIPBOARD_SYNC, payload)
+                }
+                Log.d(TAG, "Clipboard sync sent (${text.length} chars)")
+            } catch (e: Exception) {
+                Log.d(TAG, "Failed to send clipboard sync: ${e.message}")
+            }
+        }
+    }
+
+    private fun onBatchRequest(sess: FerrySession, output: OutputStream, payload: JSONObject) {
+        val batchId = payload.optString("batch_id", "")
+        val batchName = payload.optString("batch_name", "Batch")
+        val totalItems = payload.optInt("total_items", 0)
+        Log.i(TAG, "Received BATCH_REQUEST: $batchName ($totalItems items) batchId=${batchId.take(8)}")
+
+        if (batchId.isEmpty() || totalItems <= 0) {
+            sendEncryptedMessage(sess, output, ProtocolConstants.MessageTypes.BATCH_REJECT, JSONObject().apply {
+                put("batch_id", batchId)
+                put("reason", "INVALID_REQUEST")
+            })
+            return
+        }
+
+        // Track the active batch so onTransferRequest auto-accepts items belonging to it
+        activeBatchId = batchId
+        activeBatchItemsReceived = 0
+        activeBatchTotalItems = totalItems
+
+        // Auto-accept: batch is always accepted when we have no competing transfer
+        sendEncryptedMessage(sess, output, ProtocolConstants.MessageTypes.BATCH_ACCEPT, JSONObject().apply {
+            put("batch_id", batchId)
+        })
+        Log.i(TAG, "BATCH_ACCEPT sent for batchId=${batchId.take(8)}")
+    }
+
+    private fun onBatchCancel(sess: FerrySession, output: OutputStream, batchId: String) {
+        Log.i(TAG, "Received BATCH_CANCEL for ${batchId.take(8)}")
+        outgoingCancelledByPeer.set(true)
+        pendingBatchAccept?.complete(false)
+        pendingBatchAccept = null
+        // Clear incoming batch state too
+        if (batchId == activeBatchId) {
+            activeBatchId = null
+            activeBatchItemsReceived = 0
+            activeBatchTotalItems = 0
+        }
+    }
+
+    private fun onBatchComplete(sess: FerrySession, output: OutputStream, batchId: String) {
+        Log.i(TAG, "Received BATCH_COMPLETE for ${batchId.take(8)} (received $activeBatchItemsReceived/$activeBatchTotalItems)")
+        if (batchId == activeBatchId) {
+            activeBatchId = null
+            activeBatchItemsReceived = 0
+            activeBatchTotalItems = 0
         }
     }
 
     private fun onTransferRequest(sess: FerrySession, output: OutputStream, payload: JSONObject) {
         val transferId = payload.optString("transfer_id", "")
-        if (activeReceiver != null) {
+        val batchId = payload.optString("batch_id", "")
+        val isBatched = batchId.isNotEmpty() && batchId == activeBatchId
+
+        // Reject if busy with single transfer and this is not a batched item
+        if (activeReceiver != null && !isBatched) {
             Log.w(TAG, "Busy — rejecting transfer ${transferId.take(8)}")
             sendEncryptedMessage(sess, output, ProtocolConstants.MessageTypes.TRANSFER_REJECT,
                 JSONObject().apply { put("transfer_id", transferId); put("reason", "BUSY") })
+            return
+        }
+        // Reject batched item if batch ID is not recognised
+        if (batchId.isNotEmpty() && batchId != activeBatchId) {
+            Log.w(TAG, "Rejecting transfer ${transferId.take(8)} — unknown batch $batchId")
+            sendEncryptedMessage(sess, output, ProtocolConstants.MessageTypes.TRANSFER_REJECT,
+                JSONObject().apply { put("transfer_id", transferId); put("reason", "INVALID_BATCH") })
             return
         }
         try {
@@ -1096,6 +1262,90 @@ class FerryControlClient(
         output.flush()
     }
 
+    // ── Batch Transfers (Phase 4C) ────────────────────────────────────────────
+
+    suspend fun sendBatch(uris: List<Uri>, context: Context, batchName: String): Boolean = withContext(Dispatchers.IO) {
+        val sess = session
+        val out = activeOutput
+        if (sess == null || out == null || sess.state != FerrySession.State.ESTABLISHED) {
+            Log.e(TAG, "Cannot send batch: session not ESTABLISHED")
+            return@withContext false
+        }
+        
+        if (uris.isEmpty()) return@withContext false
+
+        val batchId = UUID.randomUUID().toString()
+        var totalBytes = 0L
+        for (uri in uris) {
+            context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+                val sizeIdx = cursor.getColumnIndex(OpenableColumns.SIZE)
+                if (cursor.moveToFirst() && sizeIdx >= 0) {
+                    totalBytes += cursor.getLong(sizeIdx)
+                }
+            }
+        }
+
+        val payload = JSONObject().apply {
+            put("batch_id", batchId)
+            put("batch_name", batchName)
+            put("total_items", uris.size)  // protocol field name (matches Linux)
+            put("total_bytes", totalBytes)
+            put("sender_identity", identity.publicKeyB64)
+            put("created_at", System.currentTimeMillis())
+        }
+
+        outgoingCancelled.set(false)
+        outgoingCancelledByPeer.set(false)
+
+        Log.i(TAG, "Sending BATCH_REQUEST for $batchName ($totalBytes bytes)")
+        sendEncryptedMessage(sess, out, ProtocolConstants.MessageTypes.BATCH_REQUEST, payload)
+
+        val acceptDeferred = CompletableDeferred<Boolean>()
+        pendingBatchAccept = acceptDeferred
+
+        val accepted = try {
+            kotlinx.coroutines.withTimeout(60_000L) { acceptDeferred.await() }
+        } catch (e: Exception) {
+            pendingBatchAccept = null
+            Log.e(TAG, "Batch request timed out")
+            return@withContext false
+        }
+
+        if (!accepted) {
+            Log.i(TAG, "Batch request rejected by peer")
+            return@withContext false
+        }
+
+        var success = true
+        activeBatchTotalItemsOut = uris.size
+        activeBatchSentItems = 0
+        activeBatchName = batchName
+        for (uri in uris) {
+            if (outgoingCancelled.get() || outgoingCancelledByPeer.get()) {
+                success = false
+                break
+            }
+            activeBatchSentItems++
+            val mimeType = context.contentResolver.getType(uri) ?: "application/octet-stream"
+            // For now, no tree traversal, just list of files, so relative_path = ""
+            val ok = sendFile(uri, context, mimeType, batchId = batchId, relativePath = "")
+            if (!ok) {
+                success = false
+                break
+            }
+        }
+        activeBatchTotalItemsOut = 0
+        activeBatchSentItems = 0
+        activeBatchName = ""
+
+        if (success) {
+            sendEncryptedMessage(sess, out, ProtocolConstants.MessageTypes.BATCH_COMPLETE, JSONObject().apply { put("batch_id", batchId) })
+        } else {
+            sendEncryptedMessage(sess, out, ProtocolConstants.MessageTypes.BATCH_CANCEL, JSONObject().apply { put("batch_id", batchId) })
+        }
+        return@withContext success
+    }
+
     // ── Outgoing Transfers ────────────────────────────────────────────────────
 
     /**
@@ -1111,6 +1361,8 @@ class FerryControlClient(
         uri: Uri,
         context: Context,
         mimeType: String = "application/octet-stream",
+        batchId: String = "",
+        relativePath: String = "",
     ): Boolean = withContext(Dispatchers.IO) {
         val sess = session
         val out = activeOutput
@@ -1174,19 +1426,30 @@ class FerryControlClient(
             put("chunk_count", chunkCount)
             put("sender_identity", identity.publicKeyB64)
             put("created_at", System.currentTimeMillis())
+            put("batch_id", batchId)
+            put("relative_path", relativePath)
         }
 
         // Reset cancellation flags for this transfer
         outgoingCancelled.set(false)
         outgoingCancelledByPeer.set(false)
 
-        // Initialise progress
+        // Initialise progress (with batch context if this is part of a batch)
+        val batchContext = if (batchId.isNotEmpty() && activeBatchTotalItemsOut > 0) {
+            BatchInfo(
+                batchId = batchId,
+                batchName = activeBatchName,
+                doneItems = activeBatchSentItems,
+                totalItems = activeBatchTotalItemsOut,
+            )
+        } else null
         _transferProgress.value = TransferProgress(
             transferId = transferId,
             fileName = fileName,
             bytesDone = 0L,
             totalBytes = fileSize,
             direction = TransferProgress.Direction.OUTGOING,
+            batchInfo = batchContext,
         )
 
         Log.i(TAG, "Sending TRANSFER_REQUEST for $fileName ($fileSize bytes)")
@@ -1220,6 +1483,8 @@ class FerryControlClient(
         }
 
         Log.i(TAG, "Transfer accepted — streaming chunks")
+        // Start foreground service to keep transfer alive if app is backgrounded
+        FerryTransferService.startTransferService(context, fileName)
         val client = FerryTransferClient()
         var streamSuccess = false
         var bytesSent = 0L
@@ -1235,13 +1500,26 @@ class FerryControlClient(
                 },
                 onProgress = { done, total ->
                     bytesSent = done
+                    val batchCtx = if (batchId.isNotEmpty() && activeBatchTotalItemsOut > 0) {
+                        BatchInfo(
+                            batchId = batchId,
+                            batchName = activeBatchName,
+                            doneItems = activeBatchSentItems,
+                            totalItems = activeBatchTotalItemsOut,
+                        )
+                    } else null
                     _transferProgress.value = TransferProgress(
                         transferId = transferId,
                         fileName = fileName,
                         bytesDone = done,
                         totalBytes = total,
                         direction = TransferProgress.Direction.OUTGOING,
+                        batchInfo = batchCtx,
                     )
+                    // Update foreground service notification
+                    val pct = if (total > 0) ((done * 100) / total).toInt() else 0
+                    val batchLabel = batchCtx?.let { "${it.doneItems}/${it.totalItems}: $fileName" } ?: ""
+                    FerryTransferService.updateProgress(context, fileName, pct, batchLabel)
                 },
                 cancelSignal = { outgoingCancelled.get() },
             )
@@ -1290,6 +1568,10 @@ class FerryControlClient(
         }
 
         _transferProgress.value = null
+        // Stop the foreground service (only stops if this was the last transfer in any batch)
+        if (batchId.isEmpty() || activeBatchTotalItemsOut == 0) {
+            FerryTransferService.stopTransferService(context)
+        }
         appendHistory(TransferHistoryEntry(transferId, fileName, fileSize,
             TransferProgress.Direction.OUTGOING, streamSuccess, System.currentTimeMillis()))
 
