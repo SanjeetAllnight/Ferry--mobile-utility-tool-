@@ -5,52 +5,23 @@ import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.border
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.CenterAlignedTopAppBar
-import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.ExtendedFloatingActionButton
-import androidx.compose.material3.Icon
-import androidx.compose.material3.LinearProgressIndicator
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBarDefaults
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -108,20 +79,8 @@ fun FerryApp(
         cm?.setPrimaryClip(android.content.ClipData.newPlainText("Ferry Clipboard Sync", text))
     }
 
-    // Clipboard sync toggle state
     val clipboardSyncEnabled = remember { mutableStateOf(false) }
-
     val isEstablished = sessionState == FerrySession.State.ESTABLISHED
-
-    val filePicker = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.GetContent()
-    ) { uri: Uri? ->
-        if (uri != null) {
-            scope.launch {
-                controlClient?.sendFile(uri, context)
-            }
-        }
-    }
 
     val multipleFilePicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetMultipleContents()
@@ -143,7 +102,6 @@ fun FerryApp(
                 if (treeNode != null) {
                     val batchName = treeNode.name ?: "Folder"
                     val uris = mutableListOf<Uri>()
-                    // Full recursive SAF traversal — collects all files in all subdirectories
                     collectUrisRecursively(treeNode, uris)
                     if (uris.isNotEmpty()) {
                         controlClient?.sendBatch(uris, context, batchName)
@@ -171,41 +129,26 @@ fun FerryApp(
     }
 
     Scaffold(
+        containerColor = MaterialTheme.colorScheme.background,
         topBar = {
-            CenterAlignedTopAppBar(
-                title = {
-                    Text(
-                        text = stringResource(R.string.app_name),
-                        fontWeight = FontWeight.Bold,
-                        style = MaterialTheme.typography.titleLarge
+            Column {
+                TopAppBar(
+                    title = {
+                        Column(verticalArrangement = Arrangement.Center) {
+                            Text(
+                                "FERRY",
+                                style = MaterialTheme.typography.labelLarge,
+                                color = MaterialTheme.colorScheme.primary,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    },
+                    colors = TopAppBarDefaults.topAppBarColors(
+                        containerColor = MaterialTheme.colorScheme.background,
+                        titleContentColor = MaterialTheme.colorScheme.primary
                     )
-                },
-                colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surface
                 )
-            )
-        },
-        floatingActionButton = {
-            if (isEstablished) {
-                Column(
-                    horizontalAlignment = Alignment.End,
-                    verticalArrangement = Arrangement.spacedBy(16.dp)
-                ) {
-                    ExtendedFloatingActionButton(
-                        text = { Text("Send Files") },
-                        icon = { Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send Files") },
-                        onClick = { multipleFilePicker.launch("*/*") },
-                        containerColor = MaterialTheme.colorScheme.primary,
-                        contentColor = MaterialTheme.colorScheme.onPrimary,
-                    )
-                    ExtendedFloatingActionButton(
-                        text = { Text("Send Folder") },
-                        icon = { Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send Folder") },
-                        onClick = { folderPicker.launch(null) },
-                        containerColor = MaterialTheme.colorScheme.secondaryContainer,
-                        contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
-                    )
-                }
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             }
         }
     ) { innerPadding ->
@@ -214,78 +157,111 @@ fun FerryApp(
                 .fillMaxSize()
                 .padding(innerPadding)
                 .verticalScroll(rememberScrollState())
-                .padding(horizontal = 20.dp, vertical = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
+                .padding(horizontal = 16.dp, vertical = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(24.dp)
         ) {
-
             // ── Status Header Card ─────────────────────────────────────────
-            Card(
+            Surface(
                 modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(20.dp),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.primaryContainer
-                )
+                shape = RoundedCornerShape(4.dp),
+                color = MaterialTheme.colorScheme.surfaceContainerLow,
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
             ) {
-                Column(
-                    modifier = Modifier.padding(20.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                Row(
+                    modifier = Modifier.padding(16.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
                     Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
                         Box(
                             modifier = Modifier
-                                .size(10.dp)
-                                .clip(CircleShape)
-                                .background(
-                                    if (isEstablished) Color(0xFF2E7D32) else Color(0xFF1565C0)
+                                .size(8.dp)
+                                .clip(RoundedCornerShape(0.dp))
+                                .background(if (isEstablished) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline)
+                        )
+                        Column {
+                            val statusTitle = if (isEstablished) "Connected securely" else "Network scan active"
+                            Text(
+                                text = statusTitle,
+                                style = MaterialTheme.typography.titleMedium,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            Text(
+                                text = "LOCAL NETWORK • END-TO-END ENCRYPTED",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+            }
+
+            // ── Active Primary Peer Card ─────────────────────────────────────────
+            if (isEstablished && connectedDevice != null) {
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(4.dp),
+                    color = MaterialTheme.colorScheme.surfaceContainer,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Row(
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                "TRUSTED PEER",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Text(
+                                "AUTHORIZED",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(48.dp)
+                                    .background(MaterialTheme.colorScheme.surfaceContainerHighest, RoundedCornerShape(4.dp))
+                            )
+                            Column {
+                                Text(
+                                    text = connectedDevice?.deviceName ?: "Unknown Device",
+                                    style = MaterialTheme.typography.headlineMedium,
+                                    color = MaterialTheme.colorScheme.primary
                                 )
-                        )
-                        Text(
-                            text = if (isEstablished) "● Secure Session Active" else "Control Plane Ready",
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.onPrimaryContainer
-                        )
-                    }
-
-                    Text(
-                        text = "Ferry",
-                        style = MaterialTheme.typography.headlineLarge,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer
-                    )
-
-                    val statusText = when {
-                        transferProgress != null -> {
-                            val pct = transferProgress!!.fraction.times(100).toInt()
-                            val batchInfo = transferProgress!!.batchInfo
-                            if (batchInfo != null)
-                                "Sending batch ${batchInfo.doneItems}/${batchInfo.totalItems}: ${transferProgress!!.fileName} ($pct%)"
-                            else
-                                "Sending: ${transferProgress!!.fileName} ($pct%)"
+                                Text(
+                                    text = "ONLINE",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
                         }
-                        incomingProgress != null ->
-                            "Receiving: ${incomingProgress!!.fileName} (${incomingProgress!!.fraction.times(100).toInt()}%)"
-                        else -> when (sessionState) {
-                            FerrySession.State.DISCONNECTED -> "mDNS peer discovery active on local Wi-Fi (_ferry._tcp)."
-                            FerrySession.State.CONNECTING -> "Connecting to ${connectedDevice?.deviceName}..."
-                            FerrySession.State.HANDSHAKING -> "Performing cryptographic handshake..."
-                            FerrySession.State.PAIRING -> "Pairing — verify code with peer"
-                            FerrySession.State.WAITING_FOR_LOCAL_DECISION -> "Pairing — waiting for your approval"
-                            FerrySession.State.WAITING_FOR_REMOTE_DECISION -> "Waiting for peer to accept..."
-                            FerrySession.State.PAIR_ACCEPTED -> "Pairing mutually accepted!"
-                            FerrySession.State.AUTHENTICATING -> "Authenticating with ${connectedDevice?.deviceName}..."
-                            FerrySession.State.ESTABLISHED -> "Encrypted session with ${connectedDevice?.deviceName}. Tap Send File to transfer."
-                            FerrySession.State.CLOSING -> "Closing session..."
-                            FerrySession.State.FAILED -> "Session failed. Tap a device to retry."
+                        Spacer(modifier = Modifier.height(16.dp))
+                        
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(
+                                onClick = { multipleFilePicker.launch("*/*") },
+                                modifier = Modifier.weight(1f).height(48.dp),
+                                shape = RoundedCornerShape(4.dp),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = MaterialTheme.colorScheme.primary,
+                                    contentColor = MaterialTheme.colorScheme.onPrimary
+                                )
+                            ) {
+                                Text("SEND FILES", style = MaterialTheme.typography.labelLarge)
+                            }
                         }
                     }
-                    Text(
-                        text = statusText,
-                        style = MaterialTheme.typography.bodyLarge,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f)
-                    )
                 }
             }
 
@@ -293,7 +269,7 @@ fun FerryApp(
             if (transferProgress != null) {
                 TransferProgressCard(
                     progress = transferProgress!!,
-                    label = "Sending",
+                    label = "SENDING",
                     onCancel = { controlClient?.cancelOutgoingTransfer(transferProgress!!.transferId) },
                 )
             }
@@ -302,291 +278,119 @@ fun FerryApp(
             if (incomingProgress != null) {
                 TransferProgressCard(
                     progress = incomingProgress!!,
-                    label = "Receiving",
+                    label = "RECEIVING",
                     onCancel = { controlClient?.cancelIncomingTransfer(incomingProgress!!.transferId) },
                 )
             }
 
-            // ── Discovery Info Card ────────────────────────────────────────
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(16.dp),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
-                )
-            ) {
-                Column(
-                    modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
+            // ── Nearby Devices ─────────────────────────────────────────────
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = "Discovery Status",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.SemiBold
+                        text = "DEVICES ON SUBNET (${discoveredDevices.size})",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                    InfoRow("Local Device Name", discoveryEngine?.deviceName ?: "Android (Ferry)")
-                    InfoRow("Local Device ID", discoveryEngine?.deviceId?.take(13)?.plus("…") ?: "Pending")
-                    InfoRow("Service Type", "_ferry._tcp (DNS-SD)")
-                    InfoRow("Wire Protocol", "dev.ferry.v${ProtocolConstants.PROTOCOL_VERSION}")
+                    Text(
+                        text = "AUTO-DISCOVERY",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary
+                    )
                 }
-            }
 
-            // ── Nearby Devices ─────────────────────────────────────────────
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(16.dp),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
-                )
-            ) {
-                Column(
-                    modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    Row(
+                if (discoveredDevices.isEmpty() && !isEstablished) {
+                    Surface(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
+                        shape = RoundedCornerShape(4.dp),
+                        color = MaterialTheme.colorScheme.surface,
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
                     ) {
-                        Text(
-                            text = "Nearby Devices",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                        if (discoveredDevices.isNotEmpty()) {
-                            Text(
-                                text = "${discoveredDevices.size} found",
-                                style = MaterialTheme.typography.labelSmall,
+                        Row(
+                            modifier = Modifier.padding(16.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(20.dp),
+                                strokeWidth = 2.dp,
                                 color = MaterialTheme.colorScheme.primary
                             )
-                        }
-                    }
-
-                    if (discoveredDevices.isEmpty()) {
-                        Surface(
-                            modifier = Modifier.fillMaxWidth(),
-                            shape = RoundedCornerShape(12.dp),
-                            color = MaterialTheme.colorScheme.surface
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(16.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(12.dp)
-                            ) {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.size(20.dp),
-                                    strokeWidth = 2.dp,
+                            Column {
+                                Text(
+                                    text = "Searching Local Network…",
+                                    style = MaterialTheme.typography.bodyMedium,
                                     color = MaterialTheme.colorScheme.primary
                                 )
-                                Column {
-                                    Text(
-                                        text = "Searching Local Network…",
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        fontWeight = FontWeight.Medium
-                                    )
-                                    Text(
-                                        text = "Make sure Ferry is running on your Arch Linux desktop on the same Wi-Fi.",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-                                    )
-                                }
+                                Text(
+                                    text = "Make sure Ferry is running on your desktop on the same Wi-Fi.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
                             }
                         }
-                    } else {
-                        discoveredDevices.forEach { device ->
-                            DiscoveredDeviceCard(
-                                device = device,
-                                isConnected = connectedDevice?.deviceId == device.deviceId &&
-                                        sessionState == FerrySession.State.ESTABLISHED,
-                                isConnecting = connectedDevice?.deviceId == device.deviceId &&
-                                        sessionState !in setOf(
-                                            FerrySession.State.DISCONNECTED,
-                                            FerrySession.State.ESTABLISHED,
-                                            FerrySession.State.FAILED,
-                                        ),
-                                onConnect = {
-                                    if (sessionState == FerrySession.State.DISCONNECTED ||
-                                        sessionState == FerrySession.State.FAILED
-                                    ) {
-                                        controlClient?.connect(device)
-                                    }
-                                },
-                                onDisconnect = { controlClient?.disconnect() },
-                                onSendFile = if (isEstablished) {
-                                    { filePicker.launch("*/*") }
-                                } else null,
-                            )
-                        }
+                    }
+                } else {
+                    discoveredDevices.forEach { device ->
+                        DiscoveredDeviceCard(
+                            device = device,
+                            isConnected = connectedDevice?.deviceId == device.deviceId &&
+                                    sessionState == FerrySession.State.ESTABLISHED,
+                            isConnecting = connectedDevice?.deviceId == device.deviceId &&
+                                    sessionState !in setOf(
+                                        FerrySession.State.DISCONNECTED,
+                                        FerrySession.State.ESTABLISHED,
+                                        FerrySession.State.FAILED,
+                                    ),
+                            onConnect = {
+                                if (sessionState == FerrySession.State.DISCONNECTED ||
+                                    sessionState == FerrySession.State.FAILED
+                                ) {
+                                    controlClient?.connect(device)
+                                }
+                            },
+                            onDisconnect = { controlClient?.disconnect() }
+                        )
                     }
                 }
             }
 
             // ── Interrupted Transfers (Resumable) ──────────────────────────
             if (interruptedTransfers.isNotEmpty()) {
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(16.dp),
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.tertiaryContainer
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "INTERRUPTED TRANSFERS",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                ) {
-                    Column(
-                        modifier = Modifier.padding(16.dp),
-                        verticalArrangement = Arrangement.spacedBy(12.dp)
-                    ) {
-                        Text(
-                            text = "Interrupted Transfers",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.SemiBold,
-                            color = MaterialTheme.colorScheme.onTertiaryContainer,
+                    interruptedTransfers.forEach { record ->
+                        InterruptedTransferRow(
+                            record = record,
+                            onResume = { scope.launch { controlClient?.requestResume(record) } },
+                            onDiscard = { controlClient?.discardInterrupted(record.transferId) }
                         )
-                        interruptedTransfers.forEach { record ->
-                            InterruptedTransferRow(
-                                record = record,
-                                onResume = {
-                                    scope.launch { controlClient?.requestResume(record) }
-                                },
-                                onDiscard = {
-                                    controlClient?.discardInterrupted(record.transferId)
-                                }
-                            )
-                        }
                     }
                 }
             }
 
             // ── Transfer History ───────────────────────────────────────────
             if (transferHistory.isNotEmpty()) {
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(16.dp),
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "TRANSFER HISTORY",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                ) {
-                    Column(
-                        modifier = Modifier.padding(16.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Text(
-                            text = "Transfer History",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.SemiBold,
-                            modifier = Modifier.padding(bottom = 4.dp)
-                        )
-                        transferHistory.take(10).forEach { entry ->
-                            TransferHistoryRow(entry)
-                        }
-                    }
-                }
-            }
-            // ── Clipboard Sync ─────────────────────────────────────────────
-            if (isEstablished) {
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(16.dp),
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.6f)
-                    )
-                ) {
-                    Row(
-                        modifier = Modifier.padding(16.dp).fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "Clipboard Sync",
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.SemiBold
-                            )
-                            Text(
-                                text = "Sync text clipboard with ${connectedDevice?.deviceName ?: "peer"}",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.7f)
-                            )
-                        }
-                        androidx.compose.material3.Switch(
-                            checked = clipboardSyncEnabled.value,
-                            onCheckedChange = { enabled ->
-                                clipboardSyncEnabled.value = enabled
-                                controlClient?.clipboardSyncEnabled = enabled
-                                if (enabled) {
-                                    // On enable, push current local clipboard to peer
-                                    val cm = context.getSystemService(android.content.ClipboardManager::class.java)
-                                    val clip = cm?.primaryClip?.getItemAt(0)?.text?.toString()
-                                    if (!clip.isNullOrEmpty()) {
-                                        controlClient?.sendClipboardSync(clip)
-                                    }
-                                }
-                            }
-                        )
+                    transferHistory.take(10).forEach { entry ->
+                        TransferHistoryRow(entry)
                     }
                 }
             }
 
-            if (sharedUri != null && !isEstablished) {
-                Card(
-                    modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer)
-                ) {
-                    Row(
-                        modifier = Modifier.padding(16.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.Send,
-                            contentDescription = "Pending Share",
-                            tint = MaterialTheme.colorScheme.onTertiaryContainer
-                        )
-                        Column(modifier = Modifier.padding(start = 16.dp).weight(1f)) {
-                            Text("Pending Share", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onTertiaryContainer)
-                            Text("Connect to a device to send", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onTertiaryContainer)
-                        }
-                        TextButton(onClick = onSharedUriHandled) {
-                            Text("Cancel", color = MaterialTheme.colorScheme.onTertiaryContainer)
-                        }
-                    }
-                }
-            }
-
-            if (sharedUris.isNotEmpty() && !isEstablished) {
-                Card(
-                    modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer)
-                ) {
-                    Row(
-                        modifier = Modifier.padding(16.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.Send,
-                            contentDescription = "Pending Batch Share",
-                            tint = MaterialTheme.colorScheme.onTertiaryContainer
-                        )
-                        Column(modifier = Modifier.padding(start = 16.dp).weight(1f)) {
-                            Text(
-                                "Pending: ${sharedUris.size} files",
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.onTertiaryContainer
-                            )
-                            Text(
-                                "Connect to a device to send",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onTertiaryContainer
-                            )
-                        }
-                        TextButton(onClick = onSharedUriHandled) {
-                            Text("Cancel", color = MaterialTheme.colorScheme.onTertiaryContainer)
-                        }
-                    }
-                }
-            }
-
-            // Bottom padding for FAB
-            if (isEstablished) {
-                Spacer(modifier = Modifier.height(72.dp))
-            }
+            // Clipboard Sync / Settings removed from main UI
         }
 
         // ── Pairing Dialog ─────────────────────────────────────────────────
@@ -595,26 +399,41 @@ fun FerryApp(
         ) {
             AlertDialog(
                 onDismissRequest = { controlClient?.rejectPairing() },
-                title = { Text("Pairing Request") },
+                containerColor = MaterialTheme.colorScheme.surfaceContainer,
+                shape = RoundedCornerShape(0.dp),
+                title = { Text("PAIR NEW DEVICE", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary) },
                 text = {
                     Column {
-                        Text("Does this code match the one on the other device?")
+                        Text("Verify this code matches the other device:", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         Spacer(modifier = Modifier.height(16.dp))
                         Text(
                             text = sasCode ?: "…",
-                            style = MaterialTheme.typography.displayMedium,
-                            fontWeight = FontWeight.Bold,
+                            style = MaterialTheme.typography.displayLarge,
+                            color = MaterialTheme.colorScheme.primary,
                             modifier = Modifier.align(Alignment.CenterHorizontally)
                         )
                     }
                 },
                 confirmButton = {
-                    Button(onClick = { controlClient?.acceptPairing() }) { Text("Accept") }
+                    Button(
+                        onClick = { controlClient?.acceptPairing() },
+                        shape = RoundedCornerShape(0.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.primary,
+                            contentColor = MaterialTheme.colorScheme.onPrimary
+                        )
+                    ) { Text("ACCEPT", style = MaterialTheme.typography.labelLarge) }
                 },
                 dismissButton = {
-                    TextButton(onClick = { controlClient?.rejectPairing() }) {
-                        Text("Reject", color = MaterialTheme.colorScheme.error)
-                    }
+                    Button(
+                        onClick = { controlClient?.rejectPairing() },
+                        shape = RoundedCornerShape(0.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = Color.Transparent,
+                            contentColor = MaterialTheme.colorScheme.error
+                        ),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.error)
+                    ) { Text("REJECT", style = MaterialTheme.typography.labelLarge) }
                 }
             )
         }
@@ -629,16 +448,15 @@ private fun TransferProgressCard(
     label: String,
     onCancel: (() -> Unit)? = null,
 ) {
-    Card(
+    Surface(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.secondaryContainer
-        )
+        shape = RoundedCornerShape(4.dp),
+        color = MaterialTheme.colorScheme.surfaceContainer,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
     ) {
         Column(
             modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
+            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -648,38 +466,43 @@ private fun TransferProgressCard(
                 Text(
                     text = "$label: ${progress.fileName}",
                     style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.primary,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f)
                 )
                 Text(
                     text = "${(progress.fraction * 100).toInt()}%",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.primary,
                     modifier = Modifier.padding(horizontal = 8.dp)
+                )
+            }
+            LinearProgressIndicator(
+                progress = { progress.fraction },
+                modifier = Modifier.fillMaxWidth().height(4.dp),
+                color = MaterialTheme.colorScheme.primary,
+                trackColor = MaterialTheme.colorScheme.surfaceContainerHighest
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "${formatBytes(progress.bytesDone)} / ${formatBytes(progress.totalBytes)}",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 if (onCancel != null) {
                     TextButton(
                         onClick = onCancel,
-                        colors = ButtonDefaults.textButtonColors(
-                            contentColor = MaterialTheme.colorScheme.error
-                        ),
+                        contentPadding = PaddingValues(0.dp)
                     ) {
-                        Text("Cancel")
+                        Text("CANCEL", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelLarge)
                     }
                 }
             }
-            LinearProgressIndicator(
-                progress = { progress.fraction },
-                modifier = Modifier.fillMaxWidth(),
-                color = MaterialTheme.colorScheme.secondary,
-            )
-            Text(
-                text = "${formatBytes(progress.bytesDone)} / ${formatBytes(progress.totalBytes)}",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.7f)
-            )
         }
     }
 }
@@ -694,18 +517,19 @@ private fun InterruptedTransferRow(
 ) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(12.dp),
-        color = MaterialTheme.colorScheme.surface
+        shape = RoundedCornerShape(4.dp),
+        color = MaterialTheme.colorScheme.surface,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
     ) {
         Column(
-            modifier = Modifier.padding(14.dp),
+            modifier = Modifier.padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             val dirIcon = if (record.direction == dev.ferry.app.transfer.InterruptedTransferStore.InterruptedRecord.Direction.INCOMING) "↓" else "↑"
             Text(
                 text = "$dirIcon  ${record.fileName}",
                 style = MaterialTheme.typography.bodyMedium,
-                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.primary,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
@@ -713,8 +537,9 @@ private fun InterruptedTransferRow(
             val fraction = if (record.fileSize > 0) record.bytesReceived.toFloat() / record.fileSize else 0f
             LinearProgressIndicator(
                 progress = { fraction },
-                modifier = Modifier.fillMaxWidth(),
-                color = MaterialTheme.colorScheme.tertiary,
+                modifier = Modifier.fillMaxWidth().height(4.dp),
+                color = MaterialTheme.colorScheme.outline,
+                trackColor = MaterialTheme.colorScheme.surfaceContainerHighest
             )
 
             Row(
@@ -724,15 +549,8 @@ private fun InterruptedTransferRow(
             ) {
                 Text(
                     text = "${formatBytes(record.bytesReceived)} / ${formatBytes(record.fileSize)} (${(fraction * 100).toInt()}%)",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
-                )
-                val ageMs = System.currentTimeMillis() - record.interruptedAt
-                val mins = ageMs / 60000
-                Text(
-                    text = if (mins < 60) "${mins}m ago" else "${mins / 60}h ago",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
 
@@ -740,17 +558,28 @@ private fun InterruptedTransferRow(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)
             ) {
-                TextButton(onClick = onDiscard) {
-                    Text("Discard", color = MaterialTheme.colorScheme.error)
+                Button(
+                    onClick = onDiscard,
+                    shape = RoundedCornerShape(4.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Color.Transparent,
+                        contentColor = MaterialTheme.colorScheme.error
+                    ),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.error),
+                    modifier = Modifier.height(36.dp)
+                ) {
+                    Text("DISCARD", style = MaterialTheme.typography.labelLarge)
                 }
                 Button(
                     onClick = onResume,
+                    shape = RoundedCornerShape(4.dp),
                     colors = ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.tertiary,
-                        contentColor = MaterialTheme.colorScheme.onTertiary
-                    )
+                        containerColor = MaterialTheme.colorScheme.primary,
+                        contentColor = MaterialTheme.colorScheme.onPrimary
+                    ),
+                    modifier = Modifier.height(36.dp)
                 ) {
-                    Text("Resume")
+                    Text("RESUME", style = MaterialTheme.typography.labelLarge)
                 }
             }
         }
@@ -763,11 +592,12 @@ private fun InterruptedTransferRow(
 private fun TransferHistoryRow(entry: FerryControlClient.TransferHistoryEntry) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(8.dp),
-        color = MaterialTheme.colorScheme.surface
+        shape = RoundedCornerShape(4.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
@@ -775,21 +605,21 @@ private fun TransferHistoryRow(entry: FerryControlClient.TransferHistoryEntry) {
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = "$dirIcon  ${entry.fileName}",
-                    style = MaterialTheme.typography.bodySmall,
-                    fontWeight = FontWeight.Medium,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.primary,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
                 Text(
                     text = formatBytes(entry.fileSize),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
             Text(
-                text = if (entry.success) "✓" else "✗",
-                style = MaterialTheme.typography.titleMedium,
-                color = if (entry.success) Color(0xFF2E7D32) else MaterialTheme.colorScheme.error,
+                text = if (entry.success) "OK" else "FAIL",
+                style = MaterialTheme.typography.labelLarge,
+                color = if (entry.success) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error,
             )
         }
     }
@@ -803,113 +633,75 @@ private fun DiscoveredDeviceCard(
     isConnected: Boolean = false,
     isConnecting: Boolean = false,
     onConnect: () -> Unit = {},
-    onDisconnect: () -> Unit = {},
-    onSendFile: (() -> Unit)? = null,
+    onDisconnect: () -> Unit = {}
 ) {
     Surface(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(12.dp),
-        color = MaterialTheme.colorScheme.surface
+        modifier = Modifier.fillMaxWidth().clickable { if (!isConnected && !isConnecting) onConnect() },
+        shape = RoundedCornerShape(4.dp),
+        color = MaterialTheme.colorScheme.surfaceContainer,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
     ) {
-        Column(
-            modifier = Modifier.padding(14.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp)
+        Row(
+            modifier = Modifier.padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
         ) {
             Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(16.dp),
+                modifier = Modifier.weight(1f)
             ) {
-                Text(
-                    text = if (device.deviceType == "desktop") "💻 ${device.deviceName}"
-                           else "📱 ${device.deviceName}",
-                    style = MaterialTheme.typography.bodyLarge,
-                    fontWeight = FontWeight.Bold
+                Box(
+                    modifier = Modifier
+                        .size(36.dp)
+                        .background(MaterialTheme.colorScheme.surfaceContainerHighest, RoundedCornerShape(4.dp))
                 )
-                val (badgeText, badgeColor, badgeBg) = when {
-                    isConnected -> Triple("● Secure", Color(0xFF1B5E20), Color(0xFFE8F5E9))
-                    isConnecting -> Triple("Pairing…", Color(0xFF0D47A1), Color(0xFFE3F2FD))
-                    else -> Triple(
-                        "Available",
-                        MaterialTheme.colorScheme.onPrimaryContainer,
-                        MaterialTheme.colorScheme.primaryContainer
-                    )
-                }
-                Surface(shape = RoundedCornerShape(6.dp), color = badgeBg) {
+                Column {
                     Text(
-                        text = badgeText,
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                        text = device.deviceName,
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.primary,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = "NEARBY",
                         style = MaterialTheme.typography.labelSmall,
-                        fontWeight = FontWeight.Bold,
-                        color = badgeColor
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
             }
-
-            Text(
-                text = "${device.host}:${device.port} • OS: ${device.osName.replaceFirstChar { it.uppercase() }} • Protocol v${device.protocolVersion}",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
-            )
-
-            if (!isConnecting) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)
+            if (isConnecting) {
+                Text("PAIRING...", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+            } else if (isConnected) {
+                Button(
+                    onClick = onDisconnect,
+                    shape = RoundedCornerShape(4.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+                        contentColor = MaterialTheme.colorScheme.primary
+                    ),
+                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 0.dp),
+                    modifier = Modifier.height(32.dp)
                 ) {
-                    if (isConnected) {
-                        if (onSendFile != null) {
-                            Button(
-                                onClick = onSendFile,
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = MaterialTheme.colorScheme.primary,
-                                ),
-                            ) { Text("Send File") }
-                        }
-                        Button(
-                            onClick = onDisconnect,
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = MaterialTheme.colorScheme.errorContainer,
-                                contentColor = MaterialTheme.colorScheme.onErrorContainer,
-                            ),
-                        ) { Text("Disconnect") }
-                    } else {
-                        Button(onClick = onConnect) { Text("Connect") }
-                    }
+                    Text("DISCONNECT", style = MaterialTheme.typography.labelLarge)
                 }
             } else {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.Center,
-                    verticalAlignment = Alignment.CenterVertically,
+                Button(
+                    onClick = onConnect,
+                    shape = RoundedCornerShape(4.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.primary,
+                        contentColor = MaterialTheme.colorScheme.onPrimary
+                    ),
+                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 0.dp),
+                    modifier = Modifier.height(32.dp)
                 ) {
-                    CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                    Text("PAIR", style = MaterialTheme.typography.labelLarge)
                 }
             }
         }
-    }
-}
-
-// ── Info Row ──────────────────────────────────────────────────────────────────
-
-@Composable
-private fun InfoRow(label: String, value: String) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Text(
-            text = label,
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-        Text(
-            text = value,
-            style = MaterialTheme.typography.bodyMedium,
-            fontWeight = FontWeight.SemiBold,
-            color = MaterialTheme.colorScheme.onSurface
-        )
     }
 }
 
@@ -927,11 +719,6 @@ private fun formatBytes(bytes: Long): String {
     return "%.1f %s".format(value, units[unit])
 }
 
-/**
- * Recursively collect all file URIs from a [androidx.documentfile.provider.DocumentFile] tree.
- * Directories are traversed; symlinks and empty files are included naturally.
- * Results are appended to [out] in breadth-first order.
- */
 private fun collectUrisRecursively(
     node: androidx.documentfile.provider.DocumentFile,
     out: MutableList<Uri>,

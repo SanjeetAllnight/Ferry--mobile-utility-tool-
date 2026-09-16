@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+
+<html class="dark" lang="en"><head><meta charset="utf-8"/><meta content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" name="viewport"/><title>Ferry</title><link href="https://fonts.googleapis.com" rel="preconnect"/><link crossorigin="" href="https://fonts.gstatic.com" rel="preconnect"/><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap" rel="stylesheet"/><link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/><script src="https://cdn.tailwindcss.com"></script><script id="tailwind-config">tailwind.config = { darkMode: "class", theme: { extend: { "colors": { "tertiary-container": "#e2e2e2", "primary-container": "#e2e2e2", "secondary": "#c7c6c6", "surface": "#131313", "on-tertiary-fixed": "#1a1c1c", "on-secondary-fixed": "#1a1c1c", "inverse-on-surface": "#313030", "tertiary-fixed": "#e2e2e2", "surface-dim": "#131313", "on-primary-fixed": "#1a1c1c", "surface-container": "#201f1f", "primary-fixed-dim": "#c6c6c7", "on-secondary-container": "#b8b8b8", "surface-container-highest": "#353534", "on-secondary": "#2f3131", "surface-container-high": "#2a2a2a", "on-primary-container": "#636565", "primary": "#ffffff", "inverse-surface": "#e5e2e1", "on-tertiary": "#2f3131", "surface-variant": "#353534", "on-tertiary-container": "#636565", "outline": "#8e9192", "secondary-container": "#484949", "surface-tint": "#c6c6c7", "secondary-fixed-dim": "#c7c6c6", "on-surface": "#e5e2e1", "tertiary-fixed-dim": "#c6c6c7", "on-error": "#690005", "on-tertiary-fixed-variant": "#454747", "error-container": "#93000a", "primary-fixed": "#e2e2e2", "on-primary": "#2f3131", "on-primary-fixed-variant": "#454747", "tertiary": "#ffffff", "surface-container-low": "#1c1b1b", "on-secondary-fixed-variant": "#464747", "on-surface-variant": "#c4c7c8", "on-error-container": "#ffdad6", "on-background": "#e5e2e1", "inverse-primary": "#5d5f5f", "background": "#131313", "surface-container-lowest": "#0e0e0e", "error": "#ffb4ab", "outline-variant": "#444748", "surface-bright": "#393939", "secondary-fixed": "#e3e2e2" }, "borderRadius": { "DEFAULT": "0.25rem", "lg": "0.5rem", "xl": "0.75rem", "full": "9999px" }, "spacing": { "gutter-lg": "1.5rem", "space-2xs": "0.125rem", "space-xl": "2rem", "space-md": "1rem", "space-2xl": "3rem", "space-sm": "0.5rem", "gutter": "1rem", "margin-md": "1.5rem", "margin": "1rem", "space-lg": "1.5rem", "space-xs": "0.25rem", "margin-lg": "3rem", "space-3xl": "4rem" }, "fontFamily": { "label-code-md": ["JetBrains Mono"], "display-lg-mobile": ["Inter"], "body-sm": ["Inter"], "headline-sm": ["Inter"], "display-lg": ["Inter"], "body-lg": ["Inter"], "label-code-sm": ["JetBrains Mono"], "body-md": ["Inter"], "headline-md": ["Inter"], "headline-lg": ["Inter"], "label-code-lg": ["JetBrains Mono"] }, "fontSize": { "label-code-md": ["12px", { "lineHeight": "16px", "letterSpacing": "0em", "fontWeight": "400" }], "display-lg-mobile": ["32px", { "lineHeight": "38px", "letterSpacing": "-0.025em", "fontWeight": "600" }], "body-sm": ["12px", { "lineHeight": "16px", "letterSpacing": "0.01em", "fontWeight": "400" }], "headline-sm": ["18px", { "lineHeight": "24px", "letterSpacing": "-0.01em", "fontWeight": "500" }], "display-lg": ["40px", { "lineHeight": "48px", "letterSpacing": "-0.03em", "fontWeight": "600" }], "body-lg": ["16px", { "lineHeight": "24px", "letterSpacing": "0em", "fontWeight": "400" }], "label-code-sm": ["10px", { "lineHeight": "14px", "letterSpacing": "0.02em", "fontWeight": "400" }], "body-md": ["14px", { "lineHeight": "20px", "letterSpacing": "0em", "fontWeight": "400" }], "headline-md": ["22px", { "lineHeight": "28px", "letterSpacing": "-0.015em", "fontWeight": "500" }], "headline-lg": ["28px", { "lineHeight": "36px", "letterSpacing": "-0.02em", "fontWeight": "500" }], "label-code-lg": ["14px", { "lineHeight": "20px", "letterSpacing": "-0.02em", "fontWeight": "500" }] } } } }</script><style>@layer base { html, body { width: 100%; margin: 0; padding: 0; } body { overscroll-behavior-y: none; background-color: #131313; } .pb-safe { padding-bottom: env(safe-area-inset-bottom, 0px); } .pt-safe { padding-top: env(safe-area-inset-top, 0px); } } ::-webkit-scrollbar { display: none; }</style><style>
+    body {
+      min-height: max(884px, 100dvh);
+    }
+  </style>
+  </head><body class="bg-surface text-on-surface font-body-md text-body-md flex flex-col min-h-screen selection:bg-primary selection:text-surface"><header class="fixed top-0 w-full z-50 pt-safe bg-surface/80 backdrop-blur-xl shadow-[0_1px_8px_rgba(0,0,0,0.04)]"><div class="h-14 px-margin flex items-center justify-between"><div class="flex items-center gap-space-sm"><img alt="Ferry Logo" class="h-8 w-auto object-contain" src="https://lh3.googleusercontent.com/aida/AEtjO1VAF7E3SfSHtuDPRlkx-GcjlPmBjZbKEtcgCHmURBDuTMPjPLI6got6K5g9sHMRtlRJ5zYYlXL_D-zKAnzyKYKp8iE--C_pc_-gNGUqVZToKfOX0Va1cjIvheCVjVmFR3B-tOLCrT_mPVb_8oe4HaAHJ0ye_otadJ8OcWuA3o_mWtndKHXqbnptKvep-AZbrkstybfYq9afLAtJH5u069UUPwEsFxRnp-L2STQWEfewgxSHZE3JZwBmP2N9"/><div class="flex flex-col"><span class="font-label-code-md text-label-code-md uppercase tracking-wider text-primary font-medium">FERRY</span><span class="font-label-code-sm text-label-code-sm text-on-surface-variant">Transfers</span></div></div><div class="flex items-center gap-space-xs"><button aria-label="Connection Status" class="w-11 h-11 flex items-center justify-center text-on-surface hover:text-primary transition-colors"><span class="material-symbols-outlined text-[20px]">sensors</span></button><a aria-label="Settings" class="w-11 h-11 flex items-center justify-center text-on-surface hover:text-primary transition-colors" data-path="settings" href="#"><span class="material-symbols-outlined text-[20px]">settings</span></a><div class="w-8 h-8 rounded-full bg-primary flex items-center justify-center ml-space-xs"><span class="material-symbols-outlined text-on-primary text-[18px]">person</span></div></div></div></header><main class="flex-1 flex flex-col relative w-full pt-14 pb-20 bg-surface"><div class="flex flex-col w-full px-margin pb-space-2xl gap-space-lg">
+<!-- Minimalist Status Banner / Network Pill -->
+<div class="flex items-center justify-between pt-space-xs">
+<div class="flex items-center gap-space-xs bg-surface-container-low px-space-sm py-space-2xs rounded">
+<span class="inline-block w-1.5 h-1.5 rounded-full bg-primary animate-pulse"></span>
+<span class="font-label-code-sm text-label-code-sm uppercase tracking-wider text-on-surface-variant">P2P_STREAM_ACTIVE</span>
+</div>
+<span class="font-label-code-sm text-label-code-sm text-on-surface-variant">PORT: 52188</span>
+</div>
+<!-- Primary Transfer Header & Global Velocity HUD -->
+<section class="bg-surface-container-low p-space-md rounded-lg flex flex-col gap-space-md">
+<div class="flex flex-col gap-space-2xs">
+<div class="flex items-center justify-between">
+<h1 class="font-headline-lg text-headline-lg text-primary tracking-tight">Sending 3 files</h1>
+<div class="w-7 h-7 bg-surface-container-high rounded flex items-center justify-center">
+<span class="material-symbols-outlined text-primary text-[18px]">sync_alt</span>
+</div>
+</div>
+<div class="flex items-center gap-space-xs">
+<span class="font-label-code-sm text-label-code-sm uppercase text-on-surface-variant">TARGET:</span>
+<span class="font-body-md text-body-md font-medium text-primary">ThinkPad P14s</span>
+<span class="font-label-code-sm text-label-code-sm text-on-surface-variant px-space-2xs bg-surface-container rounded">ARCH_LINUX</span>
+</div>
+</div>
+<!-- Global Progress Bar & Readouts -->
+<div class="flex flex-col gap-space-xs pt-space-2xs">
+<div class="flex justify-between items-baseline">
+<span class="font-label-code-lg text-label-code-lg text-primary font-medium" id="global-readout">74 MB / 128 MB</span>
+<span class="font-label-code-lg text-label-code-lg text-primary font-medium" id="global-percent">58%</span>
+</div>
+<!-- High-contrast industrial progress track -->
+<div class="w-full h-1.5 bg-surface-container-highest rounded-none overflow-hidden relative">
+<div class="h-full bg-primary transition-all duration-300 ease-out" id="global-progress-bar" style="width: 58%"></div>
+</div>
+<div class="flex justify-between items-center pt-space-2xs text-on-surface-variant">
+<span class="font-label-code-sm text-label-code-sm">14.2 MB/s • LOCAL_WIFI</span>
+<span class="font-label-code-sm text-label-code-sm">ETA: 00:03.8s</span>
+</div>
+</div>
+</section>
+<!-- Individual Transmission Queue -->
+<section class="flex flex-col gap-space-xs">
+<div class="flex items-center justify-between px-space-2xs pb-space-2xs">
+<span class="font-label-code-sm text-label-code-sm uppercase tracking-wider text-on-surface-variant">QUEUE ARCHIVE (03)</span>
+<span class="font-label-code-sm text-label-code-sm uppercase tracking-wider text-on-surface-variant">PEER_ACK_OK</span>
+</div>
+<!-- File 1: In-Flight Stream -->
+<div class="bg-surface-container p-space-md rounded-lg flex flex-col gap-space-xs transition-colors">
+<div class="flex items-start justify-between gap-space-sm">
+<div class="flex items-center gap-space-sm min-w-0">
+<div class="w-8 h-8 bg-surface-container-high rounded flex items-center justify-center flex-shrink-0">
+<span class="material-symbols-outlined text-primary text-[18px]">movie</span>
+</div>
+<div class="flex flex-col min-w-0">
+<span class="font-body-md text-body-md text-primary truncate font-medium">video.mp4</span>
+<span class="font-label-code-sm text-label-code-sm text-on-surface-variant">84 MB • 72%</span>
+</div>
+</div>
+<div class="flex flex-col items-end flex-shrink-0">
+<span class="font-label-code-sm text-label-code-sm text-primary uppercase">SENDING</span>
+<span class="font-label-code-sm text-label-code-sm text-on-surface-variant font-medium">60 MB / 84 MB</span>
+</div>
+</div>
+<!-- Track for active file -->
+<div class="w-full h-1 bg-surface-container-highest mt-space-2xs rounded-none overflow-hidden">
+<div class="h-full bg-primary transition-all duration-200" style="width: 72%"></div>
+</div>
+</div>
+<!-- File 2: Completed -->
+<div class="bg-surface-container-low p-space-md rounded-lg flex items-center justify-between">
+<div class="flex items-center gap-space-sm min-w-0">
+<div class="w-8 h-8 bg-surface-container-high rounded flex items-center justify-center flex-shrink-0">
+<span class="material-symbols-outlined text-primary text-[18px]">inventory_2</span>
+</div>
+<div class="flex flex-col min-w-0">
+<span class="font-body-md text-body-md text-primary truncate">photo_archive.tar.gz</span>
+<span class="font-label-code-sm text-label-code-sm text-on-surface-variant">32 MB • COMPLETE</span>
+</div>
+</div>
+<div class="flex items-center gap-space-2xs px-space-sm py-space-2xs bg-surface-container-high rounded flex-shrink-0">
+<span class="material-symbols-outlined text-primary text-[14px]">done</span>
+<span class="font-label-code-sm text-label-code-sm uppercase tracking-wider text-primary">VERIFIED</span>
+</div>
+</div>
+<!-- File 3: Waiting / Queued -->
+<div class="bg-surface-container-low p-space-md rounded-lg flex items-center justify-between opacity-80">
+<div class="flex items-center gap-space-sm min-w-0">
+<div class="w-8 h-8 bg-surface-container-high rounded flex items-center justify-center flex-shrink-0">
+<span class="material-symbols-outlined text-on-surface-variant text-[18px]">description</span>
+</div>
+<div class="flex flex-col min-w-0">
+<span class="font-body-md text-body-md text-secondary truncate">system_notes.pdf</span>
+<span class="font-label-code-sm text-label-code-sm text-on-surface-variant">12 MB • QUEUED</span>
+</div>
+</div>
+<div class="flex items-center gap-space-2xs flex-shrink-0">
+<span class="font-label-code-sm text-label-code-sm uppercase tracking-wider text-on-surface-variant">WAITING...</span>
+</div>
+</div>
+</section>
+<!-- Technical Handshake Diagnostics -->
+<section class="bg-surface-container-lowest p-space-md rounded-lg flex flex-col gap-space-2xs">
+<div class="flex justify-between items-center text-on-surface-variant">
+<span class="font-label-code-sm text-label-code-sm uppercase">PROTOCOL</span>
+<span class="font-label-code-sm text-label-code-sm text-on-surface">TLS 1.3 / BLAKE3_HASH</span>
+</div>
+<div class="flex justify-between items-center text-on-surface-variant">
+<span class="font-label-code-sm text-label-code-sm uppercase">SESSION ID</span>
+<span class="font-label-code-sm text-label-code-sm text-on-surface">0x9F4C...B102</span>
+</div>
+<div class="flex justify-between items-center text-on-surface-variant">
+<span class="font-label-code-sm text-label-code-sm uppercase">DIRECT LINK</span>
+<span class="font-label-code-sm text-label-code-sm text-on-surface">192.168.1.144 → 192.168.1.209</span>
+</div>
+</section>
+<!-- Persistent Background Pill & Interactive Controls -->
+<div class="flex flex-col items-center gap-space-md pt-space-sm">
+<div class="flex items-center gap-space-xs text-on-surface-variant">
+<span class="material-symbols-outlined text-[16px] text-on-surface-variant">swap_calls</span>
+<span class="font-label-code-sm text-label-code-sm uppercase tracking-wider">KEEPS RUNNING IN BACKGROUND</span>
+</div>
+<!-- Strict utilitarian monochrome action -->
+<button class="w-full h-12 bg-transparent hover:bg-surface-container-high active:bg-surface-container-highest text-primary font-body-md text-body-md uppercase tracking-wider font-medium rounded transition-colors flex items-center justify-center gap-space-xs" id="cancel-btn" onclick="handleCancelTransfer()">
+<span class="font-label-code-md text-label-code-md">[ CANCEL TRANSFER ]</span>
+</button>
+</div>
+</div>
+<script>
+  function handleCancelTransfer() {
+    const btn = document.getElementById('cancel-btn');
+    if (!btn) return;
+    btn.innerHTML = '<span class="font-label-code-md text-label-code-md tracking-wider">[ ABORTING... ]</span>';
+    btn.classList.add('opacity-50', 'pointer-events-none');
+  }
+
+  // Micro-interaction: subtle organic telemetry jitter on readout
+  setInterval(() => {
+    const bar = document.getElementById('global-progress-bar');
+    const percentLabel = document.getElementById('global-percent');
+    if (!bar || !percentLabel) return;
+    
+    let currentWidth = parseFloat(bar.style.width);
+    if (currentWidth < 95) {
+      let nextWidth = Math.min(95, currentWidth + 0.4);
+      bar.style.width = nextWidth.toFixed(1) + '%';
+      percentLabel.innerText = Math.floor(nextWidth) + '%';
+    }
+  }, 1200);
+</script></main><nav class="fixed bottom-0 w-full z-50 pb-safe bg-surface/80 backdrop-blur-xl shadow-[0_-1px_8px_rgba(0,0,0,0.04)]" data-active-classes="text-primary font-medium"><div class="h-16 px-margin flex items-center justify-around"><a class="flex-1 h-11 flex flex-col items-center justify-center gap-space-2xs text-on-surface-variant hover:text-on-surface transition-colors" data-path="peers" href="#"><span class="material-symbols-outlined text-[20px]">devices</span><span class="font-label-code-sm text-label-code-sm uppercase tracking-wider">Peers</span></a><a aria-current="page" class="flex-1 h-11 flex flex-col items-center justify-center gap-space-2xs transition-colors text-primary font-medium" data-path="transfers" href="#"><span class="material-symbols-outlined text-[20px]">sync_alt</span><span class="font-label-code-sm text-label-code-sm uppercase tracking-wider">Transfers</span></a></div><div class="w-full flex justify-center pb-space-xs"><div class="w-24 h-1 bg-outline-variant/60 rounded-full"></div></div></nav></body></html>

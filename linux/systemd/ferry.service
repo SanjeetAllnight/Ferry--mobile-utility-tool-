@@ -6,17 +6,32 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-# Run the core service in headless daemon mode (no UI)
-ExecStart=%h/.local/bin/ferry --service
+# Run the core service in headless daemon mode (no UI).
+# Priority order:
+#   1. ~/.local/bin/ferry  (pip install -e . entry point)
+#   2. /usr/local/bin/ferry (system install)
+#   3. Direct python module invocation from repo checkout
+ExecStart=/bin/sh -c '\
+  if [ -x "%h/.local/bin/ferry" ]; then \
+    exec "%h/.local/bin/ferry" --service; \
+  elif command -v ferry > /dev/null 2>&1; then \
+    exec ferry --service; \
+  else \
+    exec python3 -m ferry_linux --service; \
+  fi'
+WorkingDirectory=%h
 Restart=on-failure
 RestartSec=5
 # Log to systemd journal
 StandardOutput=journal
 StandardError=journal
-# Environment: ensure the user bus is available
+# Environment
 Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%U/bus
+Environment=XDG_RUNTIME_DIR=/run/user/%U
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 # Resource limits
 MemoryMax=256M
+Nice=5
 
 [Install]
 WantedBy=default.target

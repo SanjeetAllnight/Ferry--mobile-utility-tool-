@@ -1987,6 +1987,91 @@ class TestPhase3ETask3ResumeExecution(unittest.TestCase):
         result = service.db.get_interrupted_transfer(transfer_id)
         self.assertIsNone(result)
 
+    def test_t316_linux_sender_rejects_resume_request(self) -> None:
+        """_on_transfer_resume_request on Linux sender should return TRANSFER_RESUME_REJECT."""
+        from ferry_linux.core.service import FerryService
+        from ferry_linux.protocol.models import MessageType
+
+        service = FerryService(self.tmpdir)
+        service.send_encrypted = unittest.mock.AsyncMock()
+
+        mock_ps = unittest.mock.MagicMock()
+        mock_ps.remote_addr = "127.0.0.1:53770"
+        
+        payload = {"transfer_id": "test-123"}
+        asyncio.run(service._on_transfer_resume_request(mock_ps, payload))
+
+        service.send_encrypted.assert_called_once_with(
+            mock_ps,
+            MessageType.TRANSFER_RESUME_REJECT,
+            {"transfer_id": "test-123", "reason": "TRANSFER_NOT_FOUND"}
+        )
+
+    def test_t317_linux_receiver_requests_resume(self) -> None:
+        """request_resume on Linux receiver sends TRANSFER_RESUME_REQUEST and calls incoming.resume()."""
+        from ferry_linux.core.service import FerryService
+        from ferry_linux.core.db import InterruptedTransferInfo
+        from ferry_linux.protocol.models import MessageType
+        import time
+        import json
+
+        service = FerryService(self.tmpdir)
+        service.send_encrypted = unittest.mock.AsyncMock()
+        
+        # Override _wait_for_transfer_response to return ACCEPT
+        service._wait_for_transfer_response = unittest.mock.AsyncMock(return_value="ACCEPT")
+
+        mock_ps = unittest.mock.MagicMock()
+        mock_ps.remote_addr = "127.0.0.1:53770"
+        service._active_sessions[mock_ps.remote_addr] = mock_ps
+        
+        transfer_id = str(uuid.uuid4())
+        
+        # Create DB record
+        now_ms = int(time.time() * 1000)
+        metadata_dict = {
+            "transfer_id": transfer_id,
+            "file_name": "test.txt",
+            "file_size": 100000,
+            "chunk_size": 65536,
+            "chunk_count": 2,
+            "sha256": "a" * 64
+        }
+        
+        info = InterruptedTransferInfo(
+            transfer_id=transfer_id,
+            bytes_received=65536,
+            resume_chunk_index=1,
+            partial_sha256="0" * 64,
+            sender_identity="dGVzdA==",
+            original_metadata_json=json.dumps(metadata_dict),
+            interrupted_at=now_ms,
+            expire_at=InterruptedTransferInfo.make_expire_at(now_ms),
+        )
+        service.db.save_interrupted_transfer(info)
+        
+        # Create .part file
+        staging_dir = Path(service.config.download_dir) / "staging"
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        part_file = staging_dir / f"{transfer_id}.part"
+        part_file.write_bytes(b"a" * 65536)
+
+        # Mock resume on the IncomingTransfer class to avoid real disk IO during resume state transition
+        with unittest.mock.patch('ferry_linux.core.transfer.IncomingTransfer.resume') as mock_resume:
+            # Call request_resume
+            result = asyncio.run(service.request_resume(mock_ps.remote_addr, transfer_id))
+    
+            self.assertTrue(result)
+            mock_resume.assert_called_once_with(1)
+            
+            # Verify the message was sent
+            service.send_encrypted.assert_called_once()
+            args, _ = service.send_encrypted.call_args
+            self.assertEqual(args[1], MessageType.TRANSFER_RESUME_REQUEST)
+            self.assertEqual(args[2]["transfer_id"], transfer_id)
+            self.assertEqual(args[2]["resume_chunk_index"], 1)
+
+
 
 if __name__ == "__main__":
     unittest.main()

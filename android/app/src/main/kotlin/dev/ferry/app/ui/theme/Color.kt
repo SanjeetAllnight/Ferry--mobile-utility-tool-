@@ -2,20 +2,27 @@ package dev.ferry.app.ui.theme
 
 import androidx.compose.ui.graphics.Color
 
-val PrimaryBlue = Color(0xFF00668B)
-val OnPrimaryBlue = Color(0xFFFFFFFF)
-val PrimaryContainerBlue = Color(0xFFC3E8FF)
-val OnPrimaryContainerBlue = Color(0xFF001E2C)
+val Surface = Color(0xFF131313)
+val SurfaceContainerLowest = Color(0xFF0E0E0E)
+val SurfaceContainerLow = Color(0xFF1C1B1B)
+val SurfaceContainer = Color(0xFF201F1F)
+val SurfaceContainerHigh = Color(0xFF2A2A2A)
+val SurfaceContainerHighest = Color(0xFF353534)
+val OnSurface = Color(0xFFE5E2E1)
+val OnSurfaceVariant = Color(0xFFC4C7C8)
+val SurfaceVariant = Color(0xFF353534)
 
-val SecondaryTeal = Color(0xFF4E616D)
-val OnSecondaryTeal = Color(0xFFFFFFFF)
-val SecondaryContainerTeal = Color(0xFFD1E5F4)
-val OnSecondaryContainerTeal = Color(0xFF0A1E28)
+val Primary = Color(0xFFFFFFFF)
+val OnPrimary = Color(0xFF2F3131)
 
-val DarkBackground = Color(0xFF101418)
-val DarkSurface = Color(0xFF101418)
-val DarkSurfaceVariant = Color(0xFF40484D)
-val DarkOnSurface = Color(0xFFE1E2E8)
-val DarkPrimary = Color(0xFF7BD0FF)
-val DarkPrimaryContainer = Color(0xFF004D6B)
-val DarkOnPrimaryContainer = Color(0xFFC3E8FF)
+val Secondary = Color(0xFFC7C6C6)
+val OnSecondary = Color(0xFF2F3131)
+
+val Error = Color(0xFFFFB4AB)
+val OnError = Color(0xFF690005)
+
+val Outline = Color(0xFF8E9192)
+val OutlineVariant = Color(0xFF444748)
+
+val Background = Color(0xFF131313)
+val OnBackground = Color(0xFFE5E2E1)

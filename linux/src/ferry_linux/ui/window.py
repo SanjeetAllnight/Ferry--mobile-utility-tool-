@@ -55,28 +55,23 @@ class FerryMainWindow(Adw.ApplicationWindow):
         self._send_btn.set_sensitive(False)
         self._send_btn.set_tooltip_text("Send a file to a connected device")
         self._send_btn.connect("clicked", self._on_send_file_clicked)
-        header_bar.pack_end(self._send_btn)
+        
 
         self._send_files_btn = Gtk.Button(label="Send Files")
         self._send_files_btn.set_icon_name("edit-copy-symbolic")
         self._send_files_btn.set_sensitive(False)
         self._send_files_btn.set_tooltip_text("Send multiple files to a connected device")
         self._send_files_btn.connect("clicked", self._on_send_multiple_files_clicked)
-        header_bar.pack_end(self._send_files_btn)
+        
 
         self._send_dir_btn = Gtk.Button(label="Send Folder")
         self._send_dir_btn.set_icon_name("folder-new-symbolic")
         self._send_dir_btn.set_sensitive(False)
         self._send_dir_btn.set_tooltip_text("Send a folder (batch) to a connected device")
         self._send_dir_btn.connect("clicked", self._on_send_dir_clicked)
-        header_bar.pack_end(self._send_dir_btn)
+        
 
-        # Settings button
-        settings_btn = Gtk.Button()
-        settings_btn.set_icon_name("preferences-system-symbolic")
-        settings_btn.set_tooltip_text("Ferry Settings")
-        settings_btn.connect("clicked", self._on_settings_clicked)
-        header_bar.pack_start(settings_btn)
+
 
         # ── Scrolled container ────────────────────────────────────────────
         scrolled = Gtk.ScrolledWindow()
@@ -104,7 +99,7 @@ class FerryMainWindow(Adw.ApplicationWindow):
         pref_group = Adw.PreferencesGroup()
         pref_group.set_title("System Status")
         pref_group.set_description("Local daemon and connectivity state")
-        content_box.append(pref_group)
+        # content_box.append(pref_group)  # Hidden for ultra-minimal polish
 
         service_row = Adw.ActionRow()
         service_row.set_title("Ferry Core Discovery Service")
@@ -187,13 +182,8 @@ class FerryMainWindow(Adw.ApplicationWindow):
         diag_row.add_row(self._diag_mdns_row)
 
         # ── Drag-and-Drop target on scrolled window ────────────────
-        drop_target = Gtk.DropTarget.new(type=None, actions=Gtk.DragAction.COPY)
-        drop_target.set_gtypes([type(None)])
-        # Accept text/uri-list DND drops
         try:
-            import gi
-            from gi.repository import Gdk
-            drop_target = Gtk.DropTarget.new(Gdk.FileList, Gtk.DragAction.COPY)
+            drop_target = Gtk.DropTarget.new(Gdk.FileList, Gdk.DragAction.COPY)
             drop_target.connect("accept", self._on_drop_accept)
             drop_target.connect("drop", self._on_drop)
             drop_target.connect("enter", self._on_drop_enter)
@@ -209,30 +199,30 @@ class FerryMainWindow(Adw.ApplicationWindow):
 
     # ── Trusted Devices ───────────────────────────────────────────────────────
 
-    def _update_trusted_devices(self) -> bool:
-        app = self.get_application()
-        if not app or not app.service:
-            return False
-
+    def update_trusted_devices_from_db(self, devices: list) -> bool:
         for row in self._trusted_rows:
             self.trusted_group.remove(row)
         self._trusted_rows.clear()
 
-        established = app.service.established_sessions
-        devices = app.service.db.list_devices()
-
+        established = getattr(self, "_ipc_sessions", {})
+        
         self._send_btn.set_sensitive(bool(established))
         self._check_pending_send()
 
         # Combine DB devices and active established sessions
-        known_dev_ids = {d.device_id for d in devices}
+        known_dev_ids = {d.get("device_id") for d in devices if isinstance(d, dict) and d.get("device_id")}
+        
         all_display_items = []
         for d in devices:
-            all_display_items.append((d.device_id, d.device_name, d.identity_public_key_b64, True))
+            if isinstance(d, dict):
+                all_display_items.append((d.get("device_id"), d.get("device_name"), d.get("identity_public_key_b64"), True))
+            else:
+                all_display_items.append((d.device_id, d.device_name, d.identity_public_key_b64, True))
+                
         for addr, ps in established.items():
-            dev_id = ps.remote_device_id or addr
+            dev_id = ps.get("remote_device_id") or addr
             if dev_id not in known_dev_ids:
-                all_display_items.append((dev_id, ps.remote_device_name or "Android", ps.remote_static_pub_b64 or "", False))
+                all_display_items.append((dev_id, ps.get("remote_device_name") or "Android", ps.get("remote_static_pub_b64") or "", False))
                 known_dev_ids.add(dev_id)
 
         if not all_display_items:
@@ -244,13 +234,12 @@ class FerryMainWindow(Adw.ApplicationWindow):
 
         for dev_id, dev_name, pubkey, in_db in all_display_items:
             row = Adw.ActionRow()
-            row.set_title(dev_name)
-            row.set_subtitle(dev_id[:24] + "…")
+            row.set_title(dev_name or "Unknown")
+            row.set_subtitle((dev_id or "")[:24] + "…")
             row.set_icon_name("phone-symbolic")
 
-            # Connection badge
             is_connected = any(
-                ps.remote_device_id == dev_id or addr == dev_id
+                ps.get("remote_device_id") == dev_id or addr == dev_id
                 for addr, ps in established.items()
             )
             if is_connected:
@@ -258,14 +247,13 @@ class FerryMainWindow(Adw.ApplicationWindow):
                 badge.add_css_class("success")
                 row.add_suffix(badge)
 
-                # Per-device Send File button
                 send_btn = Gtk.Button(label="Send")
                 send_btn.set_valign(Gtk.Align.CENTER)
                 send_btn.add_css_class("suggested-action")
                 send_btn.set_icon_name("document-send-symbolic")
                 remote_addr = next(
                     (addr for addr, ps in established.items()
-                     if ps.remote_device_id == dev_id or addr == dev_id),
+                     if ps.get("remote_device_id") == dev_id or addr == dev_id),
                     None,
                 )
                 send_btn.connect(
@@ -285,6 +273,19 @@ class FerryMainWindow(Adw.ApplicationWindow):
 
             self.trusted_group.add(row)
             self._trusted_rows.append(row)
+        return False
+
+    def _update_trusted_devices(self) -> bool:
+        app = self.get_application()
+        if not app or getattr(app, "service", None) is None:
+            return False
+        
+        try:
+            devices = app.service.db.list_devices()
+        except AttributeError:
+            devices = app.service.db.get_trusted_devices()
+            
+        self.update_trusted_devices_from_db(devices)
         return False
 
     def _on_unpair_clicked_pk(self, pubkey: str) -> None:
@@ -1087,3 +1088,52 @@ class FerryMainWindow(Adw.ApplicationWindow):
 
         return False
 
+
+    # ── IPC Callbacks ──────────────────────────────────────────────────
+    def set_daemon_status(self, connected: bool) -> None:
+        pass  # Ultra-minimal UI doesn't need to show daemon status explicitly
+
+    def apply_state_snapshot(self, devices: list = None, sessions: list = None, trusted: list = None, active_transfers: list = None, **kwargs) -> None:
+        devices = devices or []
+        sessions = sessions or []
+        trusted = trusted or []
+        self._ipc_sessions = {s["remote_addr"]: s for s in sessions}
+        GLib.idle_add(self.update_discovered_devices, devices)
+        GLib.idle_add(self.update_trusted_devices_from_db, trusted)
+        for s in sessions:
+            GLib.idle_add(self.handle_session_state, s["remote_addr"], s.get("state", "DISCONNECTED"))
+
+    def update_discovered_devices_ipc(self, devices: list) -> None:
+        GLib.idle_add(self.update_discovered_devices, devices)
+
+    def handle_session_state_ipc(self, remote_addr: str, state_name: str) -> None:
+        if not hasattr(self, "_ipc_sessions"):
+            self._ipc_sessions = {}
+        if state_name == "DISCONNECTED":
+            self._ipc_sessions.pop(remote_addr, None)
+        else:
+            if remote_addr not in self._ipc_sessions:
+                self._ipc_sessions[remote_addr] = {"remote_addr": remote_addr}
+            self._ipc_sessions[remote_addr]["state"] = state_name
+        GLib.idle_add(self.handle_session_state, remote_addr, state_name)
+
+    def handle_transfer_request_ipc(self, remote_addr: str, transfer_id: str, file_name: str, file_size: int) -> None:
+        GLib.idle_add(self.handle_transfer_request, remote_addr, transfer_id, file_name, file_size)
+
+    def update_transfer_progress_ipc(self, transfer_id: str, bytes_done: int, total_bytes: int) -> None:
+        GLib.idle_add(self.update_transfer_progress, transfer_id, bytes_done, total_bytes)
+
+    def handle_transfer_complete_ipc(self, transfer_id: str, success: bool, file_name: str, direction: str) -> None:
+        GLib.idle_add(self.handle_transfer_complete, transfer_id, success, file_name, direction)
+
+    def show_pairing_dialog_ipc(self, remote_addr: str, device_name: str, sas_code: str) -> None:
+        GLib.idle_add(self.show_pairing_dialog, remote_addr, device_name, sas_code)
+
+    def handle_clipboard_incoming(self, text: str) -> None:
+        pass  # Clipboard Sync UI was removed in final polish
+
+    def update_transfer_history_records(self, records: list) -> None:
+        GLib.idle_add(self.update_transfer_history_from_db, records)
+
+    def update_trusted_devices_ipc(self, devices: list) -> None:
+        GLib.idle_add(self.update_trusted_devices_from_db, devices)

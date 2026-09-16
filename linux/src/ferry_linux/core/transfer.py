@@ -639,6 +639,18 @@ class IncomingTransfer:
         # If actual_bytes_on_disk is not a multiple of chunk_size, the last
         # partial chunk must be discarded and re-sent — record the lower bound.
         # _next_seq now holds the index of the first chunk that needs re-sending.
+        
+        # We must truncate the file to the exact chunk boundary so that resume
+        # appending and SHA-256 computation are correct.
+        aligned_size = self._next_seq * self.meta.chunk_size
+        if aligned_size < actual_bytes_on_disk and self._temp_path is not None:
+            try:
+                import os
+                os.truncate(self._temp_path, aligned_size)
+                self._bytes_received = aligned_size
+                logger.info("Truncated partial file from %d to %d bytes (chunk aligned)", actual_bytes_on_disk, aligned_size)
+            except OSError as exc:
+                logger.warning("Failed to truncate partial file: %s", exc)
 
         self._state = _transfer_transition(self._state, TransferState.INTERRUPTED)
         logger.info(

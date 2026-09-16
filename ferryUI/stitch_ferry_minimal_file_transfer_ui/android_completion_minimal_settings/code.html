@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+
+<html class="dark" lang="en"><head><meta charset="utf-8"/><meta content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" name="viewport"/><title>Ferry</title><link href="https://fonts.googleapis.com" rel="preconnect"/><link crossorigin="" href="https://fonts.gstatic.com" rel="preconnect"/><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap" rel="stylesheet"/><link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/><script src="https://cdn.tailwindcss.com"></script><script id="tailwind-config">tailwind.config = { darkMode: "class", theme: { extend: { "colors": { "tertiary-container": "#e2e2e2", "primary-container": "#e2e2e2", "secondary": "#c7c6c6", "surface": "#131313", "on-tertiary-fixed": "#1a1c1c", "on-secondary-fixed": "#1a1c1c", "inverse-on-surface": "#313030", "tertiary-fixed": "#e2e2e2", "surface-dim": "#131313", "on-primary-fixed": "#1a1c1c", "surface-container": "#201f1f", "primary-fixed-dim": "#c6c6c7", "on-secondary-container": "#b8b8b8", "surface-container-highest": "#353534", "on-secondary": "#2f3131", "surface-container-high": "#2a2a2a", "on-primary-container": "#636565", "primary": "#ffffff", "inverse-surface": "#e5e2e1", "on-tertiary": "#2f3131", "surface-variant": "#353534", "on-tertiary-container": "#636565", "outline": "#8e9192", "secondary-container": "#484949", "surface-tint": "#c6c6c7", "secondary-fixed-dim": "#c7c6c6", "on-surface": "#e5e2e1", "tertiary-fixed-dim": "#c6c6c7", "on-error": "#690005", "on-tertiary-fixed-variant": "#454747", "error-container": "#93000a", "primary-fixed": "#e2e2e2", "on-primary": "#2f3131", "on-primary-fixed-variant": "#454747", "tertiary": "#ffffff", "surface-container-low": "#1c1b1b", "on-secondary-fixed-variant": "#464747", "on-surface-variant": "#c4c7c8", "on-error-container": "#ffdad6", "on-background": "#e5e2e1", "inverse-primary": "#5d5f5f", "background": "#131313", "surface-container-lowest": "#0e0e0e", "error": "#ffb4ab", "outline-variant": "#444748", "surface-bright": "#393939", "secondary-fixed": "#e3e2e2" }, "borderRadius": { "DEFAULT": "0.25rem", "lg": "0.5rem", "xl": "0.75rem", "full": "9999px" }, "spacing": { "gutter-lg": "1.5rem", "space-2xs": "0.125rem", "space-xl": "2rem", "space-md": "1rem", "space-2xl": "3rem", "space-sm": "0.5rem", "gutter": "1rem", "margin-md": "1.5rem", "margin": "1rem", "space-lg": "1.5rem", "space-xs": "0.25rem", "margin-lg": "3rem", "space-3xl": "4rem" }, "fontFamily": { "label-code-md": ["JetBrains Mono"], "display-lg-mobile": ["Inter"], "body-sm": ["Inter"], "headline-sm": ["Inter"], "display-lg": ["Inter"], "body-lg": ["Inter"], "label-code-sm": ["JetBrains Mono"], "body-md": ["Inter"], "headline-md": ["Inter"], "headline-lg": ["Inter"], "label-code-lg": ["JetBrains Mono"] }, "fontSize": { "label-code-md": ["12px", { "lineHeight": "16px", "letterSpacing": "0em", "fontWeight": "400" }], "display-lg-mobile": ["32px", { "lineHeight": "38px", "letterSpacing": "-0.025em", "fontWeight": "600" }], "body-sm": ["12px", { "lineHeight": "16px", "letterSpacing": "0.01em", "fontWeight": "400" }], "headline-sm": ["18px", { "lineHeight": "24px", "letterSpacing": "-0.01em", "fontWeight": "500" }], "display-lg": ["40px", { "lineHeight": "48px", "letterSpacing": "-0.03em", "fontWeight": "600" }], "body-lg": ["16px", { "lineHeight": "24px", "letterSpacing": "0em", "fontWeight": "400" }], "label-code-sm": ["10px", { "lineHeight": "14px", "letterSpacing": "0.02em", "fontWeight": "400" }], "body-md": ["14px", { "lineHeight": "20px", "letterSpacing": "0em", "fontWeight": "400" }], "headline-md": ["22px", { "lineHeight": "28px", "letterSpacing": "-0.015em", "fontWeight": "500" }], "headline-lg": ["28px", { "lineHeight": "36px", "letterSpacing": "-0.02em", "fontWeight": "500" }], "label-code-lg": ["14px", { "lineHeight": "20px", "letterSpacing": "-0.02em", "fontWeight": "500" }] } } } }</script><style>@layer base { html, body { width: 100%; margin: 0; padding: 0; } body { overscroll-behavior-y: none; background-color: #131313; } .pb-safe { padding-bottom: env(safe-area-inset-bottom, 0px); } .pt-safe { padding-top: env(safe-area-inset-top, 0px); } } ::-webkit-scrollbar { display: none; }</style><style>
+    body {
+      min-height: max(884px, 100dvh);
+    }
+  </style>
+  </head><body class="bg-surface text-on-surface font-body-md text-body-md flex flex-col min-h-screen selection:bg-primary selection:text-surface"><header class="fixed top-0 w-full z-50 pt-safe bg-surface/80 backdrop-blur-xl shadow-[0_1px_8px_rgba(0,0,0,0.04)]"><div class="h-14 px-margin flex items-center justify-between"><div class="flex items-center gap-space-xs"><button aria-label="Navigate back" class="w-11 h-11 flex items-center justify-center text-on-surface hover:text-primary transition-colors" onclick="history.back()"><span class="material-symbols-outlined text-[22px]">arrow_back</span></button><img alt="Ferry Logo" class="h-8 w-auto object-contain ml-space-2xs" src="https://lh3.googleusercontent.com/aida/AEtjO1VAF7E3SfSHtuDPRlkx-GcjlPmBjZbKEtcgCHmURBDuTMPjPLI6got6K5g9sHMRtlRJ5zYYlXL_D-zKAnzyKYKp8iE--C_pc_-gNGUqVZToKfOX0Va1cjIvheCVjVmFR3B-tOLCrT_mPVb_8oe4HaAHJ0ye_otadJ8OcWuA3o_mWtndKHXqbnptKvep-AZbrkstybfYq9afLAtJH5u069UUPwEsFxRnp-L2STQWEfewgxSHZE3JZwBmP2N9"/><span class="font-headline-sm text-headline-sm font-medium tracking-tight text-primary">Settings</span></div><div class="flex items-center"><div class="w-8 h-8 rounded-full bg-primary flex items-center justify-center"><span class="material-symbols-outlined text-on-primary text-[18px]">person</span></div></div></div></header><main class="flex-1 flex flex-col relative w-full pt-14 pb-safe bg-surface"><div class="flex flex-col w-full px-margin space-y-space-md pb-space-xl">
+<!-- Completed State Container -->
+<section class="bg-surface-container-low p-space-md flex flex-col space-y-space-md" id="transfer-card">
+<div class="flex items-start justify-between">
+<div class="flex items-center gap-space-sm">
+<div class="w-8 h-8 bg-surface-container-highest flex items-center justify-center">
+<span class="material-symbols-outlined text-primary text-[18px]">check</span>
+</div>
+<div>
+<div class="font-headline-sm text-headline-sm text-primary tracking-tight">Transfer Complete</div>
+<div class="font-label-code-sm text-label-code-sm text-on-surface-variant uppercase tracking-wider mt-space-2xs">P2P_LOCAL_WIFI • 100% OK</div>
+</div>
+</div>
+<span class="font-label-code-sm text-label-code-sm text-on-surface-variant bg-surface-container px-space-xs py-space-2xs">HANDSHAKE_VERIFIED</span>
+</div>
+<div class="bg-surface p-space-sm space-y-space-xs">
+<div class="font-body-md text-body-md text-on-surface flex items-center gap-space-xs">
+<span class="material-symbols-outlined text-on-surface-variant text-[16px]">laptop_chromebook</span>
+<span>ThinkPad P14s (Arch Linux / 192.168.1.142)</span>
+</div>
+<div class="font-label-code-md text-label-code-md text-on-surface-variant">
+        3 files • 128.40 MB in 00:09 • 14.2 MB/s avg
+      </div>
+</div>
+<!-- Mini Received Items Stream -->
+<div class="space-y-space-xs">
+<div class="flex items-center justify-between font-label-code-sm text-label-code-sm text-on-surface-variant bg-surface-container-lowest px-space-sm py-space-xs">
+<span class="truncate pr-space-sm">kernel-patch-6.8.9-zen.diff</span>
+<span class="text-on-surface">14.2 MB</span>
+</div>
+<div class="flex items-center justify-between font-label-code-sm text-label-code-sm text-on-surface-variant bg-surface-container-lowest px-space-sm py-space-xs">
+<span class="truncate pr-space-sm">firmware_blob_v3_enc.bin</span>
+<span class="text-on-surface">112.0 MB</span>
+</div>
+<div class="flex items-center justify-between font-label-code-sm text-label-code-sm text-on-surface-variant bg-surface-container-lowest px-space-sm py-space-xs">
+<span class="truncate pr-space-sm">sha256sums.asc</span>
+<span class="text-on-surface">2.2 KB</span>
+</div>
+</div>
+<div class="flex flex-col sm:flex-row items-stretch sm:items-center gap-space-sm pt-space-xs">
+<button class="bg-primary text-on-primary font-body-md text-body-md font-medium px-space-md py-space-sm text-center transition-colors hover:bg-secondary-fixed active:bg-secondary" onclick="document.getElementById('file-dialog').classList.toggle('hidden')">
+        [ OPEN DOWNLOAD FOLDER ]
+      </button>
+<button class="bg-surface-container text-on-surface font-body-md text-body-md px-space-md py-space-sm text-center hover:bg-surface-container-high transition-colors" onclick="document.getElementById('transfer-card').style.display='none'">
+        [ DISMISS ]
+      </button>
+</div>
+</section>
+<!-- Interactive Mock Toast Simulation Container -->
+<div class="hidden bg-surface-container-high p-space-md space-y-space-xs" id="file-dialog">
+<div class="font-label-code-sm text-label-code-sm text-on-surface-variant uppercase">TARGET DIRECTORY OPENED</div>
+<div class="font-label-code-md text-label-code-md text-primary truncate">/storage/emulated/0/Download/Ferry/</div>
+</div>
+<!-- Minimal Utility Settings Section -->
+<section class="space-y-space-sm pt-space-xs">
+<div class="flex items-center justify-between px-space-2xs">
+<h2 class="font-label-code-sm text-label-code-sm uppercase tracking-widest text-on-surface-variant">PREFERENCES</h2>
+<span class="font-label-code-sm text-label-code-sm text-outline">V 1.4.2 // LAN_ONLY</span>
+</div>
+<!-- Preference Stack -->
+<div class="bg-surface-container-low divide-y-0 space-y-space-2xs p-space-2xs">
+<!-- Item 1: Device Name -->
+<div class="bg-surface p-space-md flex flex-col space-y-space-2xs">
+<div class="flex items-center justify-between">
+<span class="font-body-md text-body-md text-on-surface-variant">Device Name</span>
+<span class="font-label-code-md text-label-code-md text-primary font-medium">Pixel 8 Pro</span>
+</div>
+<p class="font-body-sm text-body-sm text-outline">Visible to local network peers without metadata leaks</p>
+</div>
+<!-- Item 2: Receive Directory -->
+<div class="bg-surface p-space-md flex flex-col sm:flex-row sm:items-center justify-between gap-space-sm">
+<div class="space-y-space-2xs min-w-0">
+<span class="font-body-md text-body-md text-on-surface-variant">Receive Directory</span>
+<p class="font-label-code-sm text-label-code-sm text-primary truncate">/storage/emulated/0/Download/Ferry</p>
+</div>
+<button class="self-start sm:self-center bg-surface-container-high text-on-surface font-label-code-md text-label-code-md px-space-sm py-space-xs hover:bg-surface-container-highest transition-colors">
+          [ CHANGE ]
+        </button>
+</div>
+<!-- Item 3: Accept Transfers -->
+<div class="bg-surface p-space-md flex items-center justify-between gap-space-md">
+<div class="space-y-space-2xs pr-space-xs">
+<span class="font-body-md text-body-md text-on-surface">Accept Transfers</span>
+<p class="font-body-sm text-body-sm text-on-surface-variant">Automatically approve files from paired devices</p>
+</div>
+<button class="flex items-center gap-space-xs bg-surface-container-highest px-space-sm py-space-xs" id="toggle-btn" onclick="toggleAutoAccept()">
+<span class="w-3 h-3 bg-primary inline-block" id="toggle-state"></span>
+<span class="font-label-code-sm text-label-code-sm text-primary uppercase" id="toggle-label">ACTIVE</span>
+</button>
+</div>
+<!-- Item 4: Cryptographic Identity -->
+<div class="bg-surface p-space-md flex flex-col space-y-space-sm">
+<div class="flex flex-col sm:flex-row sm:items-center justify-between gap-space-xs">
+<span class="font-body-md text-body-md text-on-surface-variant">Cryptographic Identity</span>
+<span class="font-label-code-sm text-label-code-sm text-outline">ED25519_PAIR</span>
+</div>
+<div class="bg-surface-container-lowest p-space-sm font-label-code-md text-label-code-md text-primary tracking-wider break-all">
+          8F4B : 12C9 : D80A : 441B : EE92 : CC30 : 019B
+        </div>
+<div class="flex justify-end">
+<button class="bg-surface-container-high text-on-surface font-label-code-md text-label-code-md px-space-sm py-space-xs hover:bg-surface-container-highest transition-colors" onclick="regenerateFingerprint(this)">
+            [ REGENERATE KEYS ]
+          </button>
+</div>
+</div>
+<!-- Item 5: Network Interface -->
+<div class="bg-surface p-space-md flex items-center justify-between">
+<div class="space-y-space-2xs">
+<span class="font-body-md text-body-md text-on-surface-variant">Direct Port Listen</span>
+<p class="font-label-code-sm text-label-code-sm text-outline">TCP bind 53317 (mDNS multicast enabled)</p>
+</div>
+<span class="font-label-code-sm text-label-code-sm text-primary bg-surface-container px-space-xs py-space-2xs">0.0.0.0:53317</span>
+</div>
+</div>
+</section>
+<!-- Error State Alert Box (Bottom Minimal Utility Pattern) -->
+<aside class="bg-surface-container p-space-md space-y-space-sm" id="error-toast">
+<div class="flex items-start justify-between">
+<div class="flex items-center gap-space-xs">
+<span class="material-symbols-outlined text-error text-[18px]">warning</span>
+<span class="font-label-code-sm text-label-code-sm font-medium uppercase text-error tracking-wider">ERROR_CODE_IO_34</span>
+</div>
+<button class="font-label-code-sm text-label-code-sm text-on-surface-variant hover:text-primary" onclick="document.getElementById('error-toast').style.display='none'">
+        [ DISMISS ]
+      </button>
+</div>
+<div class="space-y-space-2xs">
+<div class="font-body-md text-body-md text-primary font-medium">Unable to send file</div>
+<div class="font-body-sm text-body-sm text-on-surface-variant">The source file could not be read or was moved from disk during staging.</div>
+</div>
+<div class="flex items-center gap-space-sm pt-space-2xs">
+<button class="font-label-code-sm text-label-code-sm text-primary bg-surface-container-highest px-space-sm py-space-xs hover:bg-surface-bright transition-colors" onclick="document.getElementById('error-toast').style.display='none'">
+        [ RETRY QUEUE ]
+      </button>
+<span class="font-label-code-sm text-label-code-sm text-outline">ABORT_TRANSFER_CLEAN</span>
+</div>
+</aside>
+</div>
+<script>
+  function toggleAutoAccept() {
+    const stateEl = document.getElementById('toggle-state');
+    const labelEl = document.getElementById('toggle-label');
+    const isActive = labelEl.innerText === 'ACTIVE';
+    if (isActive) {
+      stateEl.classList.remove('bg-primary');
+      stateEl.classList.add('bg-outline-variant');
+      labelEl.innerText = 'OFF';
+      labelEl.classList.remove('text-primary');
+      labelEl.classList.add('text-on-surface-variant');
+    } else {
+      stateEl.classList.remove('bg-outline-variant');
+      stateEl.classList.add('bg-primary');
+      labelEl.innerText = 'ACTIVE';
+      labelEl.classList.remove('text-on-surface-variant');
+      labelEl.classList.add('text-primary');
+    }
+  }
+
+  function regenerateFingerprint(btn) {
+    const parts = Array.from({length: 7}, () => Math.floor((1 + Math.random()) * 0x10000).toString(16).substring(1).toUpperCase());
+    const target = btn.closest('.space-y-space-sm').querySelector('.tracking-wider');
+    target.innerText = parts.join(' : ');
+  }
+</script><div class="w-full flex justify-center py-space-xs mt-auto pb-safe"><div class="w-24 h-1 bg-outline-variant/60 rounded-full"></div></div></main></body></html>

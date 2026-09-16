@@ -41,6 +41,7 @@ from .transfer import (
 )
 from .clipboard import ClipboardSyncManager
 from .notifications import NotificationManager
+from .ipc import FerryIPCServer
 from ..protocol.models import (
     FerryEnvelope,
     MessageType,
@@ -145,6 +146,8 @@ class FerryService:
         self.clipboard_sync = ClipboardSyncManager()
         # MVP: Notification manager (app reference set by UI layer)
         self.notifications: NotificationManager = NotificationManager()
+        # P1: IPC server for local UI clients
+        self.ipc_server: FerryIPCServer = FerryIPCServer(self)
 
         # Wire clipboard send callback
         async def _send_clipboard_to_peer(text: str, peer_id: str) -> None:
@@ -410,6 +413,9 @@ class FerryService:
             created_at=int(time.time() * 1000)
         )
 
+        batch = BatchOutgoingTransfer(batch_id, batch_name, total_items, total_bytes, [p for p, _ in all_files])
+        self._active_batches[batch_id] = batch
+
         logger.info(f"Sending BATCH_REQUEST {batch_id[:8]} to {remote_addr}")
         await self.send_encrypted(ps, MessageType.BATCH_REQUEST, req.to_dict())
 
@@ -420,23 +426,37 @@ class FerryService:
         )
         if response != "ACCEPT":
             logger.warning(f"Batch {batch_id[:8]} rejected by peer")
+            self._active_batches.pop(batch_id, None)
             return False
 
         # Loop through all files and send them
-        # Note: We reuse send_file but we need to modify it to take batch_id and relative_path!
-        # Actually, let's just use a modified call or update send_file
         success_count = 0
         for abs_path, rel_path in all_files:
+            if batch_id not in self._active_batches:
+                logger.info(f"Batch {batch_id[:8]} cancelled locally during transmission")
+                break
             logger.info(f"Batch {batch_id[:8]} sending item {rel_path}")
+            # Ensure send_file can access the batch object
             success = await self.send_file(remote_addr, abs_path, batch_id=batch_id, relative_path=rel_path)
             if success:
                 success_count += 1
+                batch.items_completed += 1
             else:
                 logger.warning(f"Batch item failed: {rel_path}")
-                # We could stop here, but for now we continue
+                batch.items_failed += 1
                 
-        # Send BATCH_COMPLETE
-        await self.send_encrypted(ps, MessageType.BATCH_COMPLETE, {"batch_id": batch_id})
+        # Send BATCH_COMPLETE or BATCH_CANCEL depending on if it was cancelled
+        if batch_id in self._active_batches:
+            await self.send_encrypted(ps, MessageType.BATCH_COMPLETE, {"batch_id": batch_id})
+            self._active_batches.pop(batch_id, None)
+
+        status = "COMPLETED" if success_count == total_items else "FAILED"
+        self._record_transfer_once(
+            transfer_id=batch_id, device_id=ps.remote_device_id or ps.remote_addr,
+            file_name=batch_name, file_size=total_bytes,
+            direction="OUTGOING", status=status, started_at=req.created_at, sha256="",
+        )
+        self._notify_transfer_complete(batch_id, success_count == total_items, batch_name, "OUTGOING")
         return success_count == total_items
 
 
@@ -499,18 +519,20 @@ class FerryService:
             if response != "ACCEPT":
                 status = "CANCELLED" if response == "CANCEL" or xfer._cancelled else "REJECTED"
                 logger.info("Transfer %s not accepted (response=%s, status=%s)", meta.transfer_id[:8], response, status)
-                self._record_transfer_once(
-                    transfer_id=meta.transfer_id, device_id=ps.remote_device_id or ps.remote_addr,
-                    file_name=meta.file_name, file_size=meta.file_size,
-                    direction="OUTGOING", status=status, started_at=started_at, sha256=meta.sha256,
-                )
-                self._notify_transfer_complete(meta.transfer_id, False, meta.file_name, "OUTGOING")
+                if not batch_id:
+                    self._record_transfer_once(
+                        transfer_id=meta.transfer_id, device_id=ps.remote_device_id or ps.remote_addr,
+                        file_name=meta.file_name, file_size=meta.file_size,
+                        direction="OUTGOING", status=status, started_at=started_at, sha256=meta.sha256,
+                    )
+                    self._notify_transfer_complete(meta.transfer_id, False, meta.file_name, "OUTGOING")
                 return False
 
             logger.info("Transfer %s accepted — streaming chunks", meta.transfer_id[:8])
 
             # Stream chunks, emitting progress
             bytes_sent = 0
+            batch = self._active_batches.get(batch_id) if batch_id else None
             try:
                 async for chunk_frame_bytes in xfer.stream_chunks():
                     if xfer._cancelled or xfer.state == TransferState.CANCELLING:
@@ -520,8 +542,15 @@ class FerryService:
                     await ps.writer.drain()
                     # Approximate bytes sent (chunk frame minus 28-byte header)
                     from .transfer import CHUNK_HEADER_SIZE
-                    bytes_sent += max(0, len(chunk_frame_bytes) - CHUNK_HEADER_SIZE)
-                    self._notify_transfer_progress(meta.transfer_id, bytes_sent, meta.file_size)
+                    chunk_payload_size = max(0, len(chunk_frame_bytes) - CHUNK_HEADER_SIZE)
+                    bytes_sent += chunk_payload_size
+                    
+                    if batch:
+                        batch.bytes_transferred += chunk_payload_size
+                        self._notify_transfer_progress(batch_id, batch.bytes_transferred, batch.total_bytes)
+                    else:
+                        self._notify_transfer_progress(meta.transfer_id, bytes_sent, meta.file_size)
+
             except TransferError as exc:
                 logger.error(
                     "Source read error during outgoing transfer %s: %s",
@@ -534,12 +563,13 @@ class FerryService:
                     )
                 except Exception:
                     pass
-                self._record_transfer_once(
-                    transfer_id=meta.transfer_id, device_id=ps.remote_device_id or ps.remote_addr,
-                    file_name=meta.file_name, file_size=meta.file_size,
-                    direction="OUTGOING", status="FAILED", started_at=started_at, sha256=meta.sha256,
-                )
-                self._notify_transfer_complete(meta.transfer_id, False, meta.file_name, "OUTGOING")
+                if not batch_id:
+                    self._record_transfer_once(
+                        transfer_id=meta.transfer_id, device_id=ps.remote_device_id or ps.remote_addr,
+                        file_name=meta.file_name, file_size=meta.file_size,
+                        direction="OUTGOING", status="FAILED", started_at=started_at, sha256=meta.sha256,
+                    )
+                    self._notify_transfer_complete(meta.transfer_id, False, meta.file_name, "OUTGOING")
                 return False
 
             if xfer._cancelled or xfer.state == TransferState.CANCELLING:
@@ -551,12 +581,13 @@ class FerryService:
                     )
                 except Exception as exc:
                     logger.debug("Failed sending TRANSFER_CANCEL: %s", exc)
-                self._record_transfer_once(
-                    transfer_id=meta.transfer_id, device_id=ps.remote_device_id or ps.remote_addr,
-                    file_name=meta.file_name, file_size=meta.file_size,
-                    direction="OUTGOING", status="CANCELLED", started_at=started_at, sha256=meta.sha256,
-                )
-                self._notify_transfer_complete(meta.transfer_id, False, meta.file_name, "OUTGOING")
+                if not batch_id:
+                    self._record_transfer_once(
+                        transfer_id=meta.transfer_id, device_id=ps.remote_device_id or ps.remote_addr,
+                        file_name=meta.file_name, file_size=meta.file_size,
+                        direction="OUTGOING", status="CANCELLED", started_at=started_at, sha256=meta.sha256,
+                    )
+                    self._notify_transfer_complete(meta.transfer_id, False, meta.file_name, "OUTGOING")
                 return False
 
             # Send TRANSFER_COMPLETE
@@ -575,17 +606,19 @@ class FerryService:
                 if result:
                     logger.info("Transfer %s completed successfully", meta.transfer_id[:8])
                 else:
-                    logger.error("Transfer %s failed integrity check on receiver", meta.transfer_id[:8])
+                    logger.warning("Transfer %s failed integrity check on receiver", meta.transfer_id[:8])
             except asyncio.TimeoutError:
-                logger.error("Timed out waiting for TRANSFER_RESULT for %s", meta.transfer_id[:8])
+                logger.warning("Timed out waiting for TRANSFER_RESULT for %s", meta.transfer_id[:8])
 
-            self._record_transfer_once(
-                transfer_id=meta.transfer_id, device_id=ps.remote_device_id or ps.remote_addr,
-                file_name=meta.file_name, file_size=meta.file_size,
-                direction="OUTGOING", status="COMPLETED" if result else "FAILED",
-                started_at=started_at, sha256=meta.sha256,
-            )
-            self._notify_transfer_complete(meta.transfer_id, result, meta.file_name, "OUTGOING")
+            if not batch_id:
+                self._record_transfer_once(
+                    transfer_id=meta.transfer_id, device_id=ps.remote_device_id or ps.remote_addr,
+                    file_name=meta.file_name, file_size=meta.file_size,
+                    direction="OUTGOING", status="COMPLETED" if result else "FAILED",
+                    started_at=started_at, sha256=meta.sha256 if result else "",
+                )
+                self._notify_transfer_complete(meta.transfer_id, result, meta.file_name, "OUTGOING")
+
             return result
         finally:
             self._active_outgoing_transfers.pop(meta.transfer_id, None)
@@ -616,6 +649,34 @@ class FerryService:
 
     async def cancel_transfer(self, transfer_id: str, reason: str = "USER_CANCELLED") -> bool:
         """Cancel an active outgoing or incoming transfer."""
+        # 0. Batch transfer
+        if transfer_id in self._active_batches:
+            logger.info("Cancelling batch %s locally", transfer_id[:8])
+            batch = self._active_batches.pop(transfer_id, None)
+            
+            # Find the peer
+            # For outgoing, it's whatever peer is in _active_outgoing_transfers that matches the batch?
+            # Or we can just find any peer. Let's just broadcast BATCH_CANCEL to all for now or find the peer.
+            # Actually, we can just send BATCH_CANCEL to everyone since we don't know the peer easily.
+            # Or if it's incoming, we know from _incoming_peers?
+            # Actually, `send_batch` checks `self._active_batches`, so popping it is enough to break the loop!
+            # For incoming batch, popping it is also enough to ignore further TRANSFER_REQUESTs!
+            # We should try to send BATCH_CANCEL though.
+            for ps in self._active_sessions.values():
+                try:
+                    await self.send_encrypted(ps, MessageType.BATCH_CANCEL, {"batch_id": transfer_id})
+                except Exception:
+                    pass
+            
+            if batch:
+                self._record_transfer_once(
+                    transfer_id=transfer_id, device_id="unknown",
+                    file_name=batch.batch_name, file_size=batch.total_bytes,
+                    direction="OUTGOING", status="CANCELLED", started_at=int(time.time() * 1000), sha256="",
+                )
+                self._notify_transfer_complete(transfer_id, False, batch.batch_name, "OUTGOING")
+            return True
+
         # 1. Outgoing transfer
         if transfer_id in self._active_outgoing_transfers:
             ps, xfer = self._active_outgoing_transfers[transfer_id]
@@ -745,6 +806,8 @@ class FerryService:
 
         # Start mDNS discovery
         await self.discovery.start()
+        # Register IPC server as a discovery listener so UI clients receive device updates
+        self.discovery.add_listener(self.ipc_server.on_devices_changed)
 
         # Start TCP server
         self._server = await asyncio.start_server(
@@ -758,6 +821,15 @@ class FerryService:
             self.config.device_name,
             self.identity.public_key_b64[:12],
         )
+
+        # Start IPC server for local UI clients
+        await self.ipc_server.start()
+
+        # Register IPC callbacks for session/transfer events
+        self.add_session_listener(self.ipc_server.on_session_changed)
+        self.add_transfer_request_listener(self.ipc_server.on_transfer_request)
+        self.add_transfer_progress_listener(self.ipc_server.on_transfer_progress)
+        self.add_transfer_complete_listener(self.ipc_server.on_transfer_complete)
 
         # Start chunk stall monitor
         stall_task = asyncio.create_task(self._monitor_stall_timeouts())
@@ -778,6 +850,9 @@ class FerryService:
             self._server.close()
             await self._server.wait_closed()
             self._server = None
+
+        # Stop IPC server
+        await self.ipc_server.stop()
 
         for task in list(self._active_tasks):
             task.cancel()
@@ -1013,7 +1088,13 @@ class FerryService:
                 self._active_sessions[ps.remote_addr] = ps
                 self._notify_session_change(ps.remote_addr, SessionState.PAIRING)
                 logger.info("New peer %s — Requesting pairing, SAS: %s", ps.remote_device_name, sas)
-                
+                # Broadcast pairing request to any connected UI clients
+                self.ipc_server.on_pairing_request(
+                    ps.remote_addr,
+                    ps.remote_device_name or ps.remote_addr,
+                    sas or "",
+                )
+
                 # Signal handshake done so the connection setup completes, but loop handles pairing
                 if handshake_done is not None:
                     handshake_done.set()
@@ -1127,11 +1208,18 @@ class FerryService:
 
         try:
             incoming.receive_chunk(chunk)
-            self._notify_transfer_progress(
-                chunk.transfer_id,
-                incoming.bytes_received,
-                incoming.meta.file_size,
-            )
+            batch_id = incoming.meta.batch_id
+            if batch_id:
+                batch = self._active_batches.get(batch_id)
+                if batch:
+                    batch.bytes_transferred += len(chunk.data)
+                    self._notify_transfer_progress(batch_id, batch.bytes_transferred, batch.total_bytes)
+            else:
+                self._notify_transfer_progress(
+                    chunk.transfer_id,
+                    incoming.bytes_received,
+                    incoming.meta.file_size,
+                )
         except TransferError as exc:
             logger.error(
                 "Disk I/O error for incoming transfer %s: %s",
@@ -1208,6 +1296,16 @@ class FerryService:
             )
             self._cancel_incoming_transfer(transfer_id)
 
+        # ── Phase 3E Resume Handlers ──
+        elif msg_type == MessageType.TRANSFER_RESUME_REQUEST:
+            await self._on_transfer_resume_request(ps, payload)
+            
+        elif msg_type == MessageType.TRANSFER_RESUME_ACCEPT:
+            self._signal_transfer_event(ps, "_transfer_events", transfer_id, "ACCEPT")
+            
+        elif msg_type == MessageType.TRANSFER_RESUME_REJECT:
+            self._signal_transfer_event(ps, "_transfer_events", transfer_id, "REJECT")
+
         # ── Phase 4C Batch Handlers ──
         elif msg_type == MessageType.BATCH_REQUEST:
             await self._on_batch_request(ps, payload)
@@ -1240,6 +1338,9 @@ class FerryService:
     async def accept_transfer(self, remote_addr: str, transfer_id: str) -> None:
         incoming = self._incoming_transfers.get(transfer_id)
         if not incoming:
+            batch = self._active_batches.get(transfer_id)
+            if batch:
+                await self.accept_batch(remote_addr, transfer_id)
             return
         ps = self._active_sessions.get(remote_addr)
         if not ps:
@@ -1254,6 +1355,9 @@ class FerryService:
     async def reject_transfer(self, remote_addr: str, transfer_id: str) -> None:
         incoming = self._incoming_transfers.pop(transfer_id, None)
         if not incoming:
+            batch = self._active_batches.get(transfer_id)
+            if batch:
+                await self.reject_batch(remote_addr, transfer_id)
             return
         ps = self._active_sessions.get(remote_addr)
         if not ps:
@@ -1295,34 +1399,44 @@ class FerryService:
             
         staging_dir = Path(self.config.download_dir) / "staging"
         incoming = IncomingTransfer(meta=meta, download_dir=Path(self.config.download_dir))
-        # Hard override bytes_received and chunks
-        incoming.bytes_received = info.bytes_received
-        incoming._resume_chunk_index = info.resume_chunk_index
-        incoming.state = TransferState.RESUMING
+        incoming._temp_path = staging_dir / f"{meta.transfer_id}.part"
+        incoming._state = TransferState.INTERRUPTED
         
-        # We need a new part file path? No, incoming transfer generates it from transfer_id
-        # We must open the part file in append mode. `receive_chunk` will handle it.
+        try:
+            req_payload = incoming.prepare_resume_request(
+                expected_bytes=info.bytes_received,
+                expected_chunk_index=info.resume_chunk_index
+            )
+        except Exception as exc:
+            logger.error("Failed to prepare resume request for %s: %s", transfer_id[:8], exc)
+            return False
+            
         self._incoming_transfers[transfer_id] = incoming
         self._incoming_peers[transfer_id] = ps
         
-        payload = {
-            "transfer_id": transfer_id,
-            "resume_offset_bytes": info.bytes_received,
-            "resume_chunk_index": info.resume_chunk_index,
-            "partial_sha256": info.partial_sha256,
-        }
-        await self.send_encrypted(ps, MessageType.TRANSFER_RESUME_REQUEST, payload)
+        await self.send_encrypted(ps, MessageType.TRANSFER_RESUME_REQUEST, req_payload.__dict__)
         
         logger.info("TRANSFER_RESUME_REQUEST sent for %s", transfer_id[:8])
         
         # Wait for accept or reject
-        response = await asyncio.wait_for(
-            self._wait_for_transfer_response(ps, transfer_id),
-            timeout=30.0,
-        )
+        try:
+            response = await asyncio.wait_for(
+                self._wait_for_transfer_response(ps, transfer_id),
+                timeout=30.0,
+            )
+        except asyncio.TimeoutError:
+            response = "REJECT"
         
         if response != "ACCEPT":
             logger.warning("Resume for %s was rejected", transfer_id[:8])
+            self._incoming_transfers.pop(transfer_id, None)
+            self._incoming_peers.pop(transfer_id, None)
+            return False
+            
+        try:
+            incoming.resume(req_payload.resume_chunk_index)
+        except Exception as exc:
+            logger.error("Failed to execute resume() for %s: %s", transfer_id[:8], exc)
             self._incoming_transfers.pop(transfer_id, None)
             self._incoming_peers.pop(transfer_id, None)
             return False
@@ -1365,6 +1479,7 @@ class FerryService:
         batch = self._active_batches.pop(batch_id, None)
         if batch:
             logger.info("Batch %s cancelled", batch_id[:8])
+            self._notify_transfer_complete(batch_id, False, batch.batch_name, "INCOMING")
 
     async def accept_batch(self, remote_addr: str, batch_id: str) -> None:
         batch = self._active_batches.get(batch_id)
@@ -1387,7 +1502,20 @@ class FerryService:
 
     async def _on_transfer_resume_request(self, ps: "PeerSession", payload: dict) -> None:
         """Receiver side: handle an incoming TRANSFER_RESUME_REQUEST."""
-        pass  # Implementation is elsewhere or simplified
+        transfer_id = payload.get("transfer_id")
+        if not transfer_id:
+            return
+            
+        # Linux does not persist outgoing transfers, and send_file pops them on disconnect.
+        # Thus, if we receive a resume request, we cannot fulfill it and must reject it.
+        try:
+            await self.send_encrypted(
+                ps, MessageType.TRANSFER_RESUME_REJECT,
+                {"transfer_id": transfer_id, "reason": "TRANSFER_NOT_FOUND"}
+            )
+            logger.info("Rejected resume for %s (not found/supported)", transfer_id[:8])
+        except Exception as exc:
+            logger.warning("Failed to send TRANSFER_RESUME_REJECT: %s", exc)
 
     async def _on_transfer_request(self, ps: "PeerSession", payload: dict) -> None:
         """Receiver side: handle an incoming TRANSFER_REQUEST."""
@@ -1520,20 +1648,46 @@ class FerryService:
 
         # Persist to transfer history (exactly once via _record_transfer_once)
         device_id = ps.remote_device_id or ps.remote_addr
-        self._record_transfer_once(
-            transfer_id=transfer_id, device_id=device_id,
-            file_name=incoming.meta.file_name, file_size=incoming.meta.file_size,
-            direction="INCOMING", status="COMPLETED" if success else "FAILED",
-            started_at=incoming.meta.created_at, sha256=sha256,
-        )
-
-        self._notify_transfer_complete(
-            transfer_id, success, incoming.meta.file_name, "INCOMING"
-        )
-        # Desktop notification on completion
-        self.notifications.transfer_complete(
-            incoming.meta.file_name, success, "INCOMING"
-        )
+        batch_id = incoming.meta.batch_id
+        if not batch_id:
+            self._record_transfer_once(
+                transfer_id=transfer_id, device_id=device_id,
+                file_name=incoming.meta.file_name, file_size=incoming.meta.file_size,
+                direction="INCOMING", status="COMPLETED" if success else "FAILED",
+                started_at=incoming.meta.created_at, sha256=sha256,
+            )
+            self._notify_transfer_complete(
+                transfer_id, success, incoming.meta.file_name, "INCOMING"
+            )
+            # Desktop notification on completion
+            self.notifications.transfer_complete(
+                incoming.meta.file_name, success, "INCOMING"
+            )
+        else:
+            batch = self._active_batches.get(batch_id)
+            if batch:
+                if success:
+                    batch.items_completed += 1
+                else:
+                    batch.items_failed += 1
+                
+                # Check if batch is fully received
+                if batch.items_completed + batch.items_failed == batch.total_items:
+                    batch_success = batch.items_failed == 0
+                    self._active_batches.pop(batch_id, None)
+                    status = "COMPLETED" if batch_success else "FAILED"
+                    self._record_transfer_once(
+                        transfer_id=batch_id, device_id=device_id,
+                        file_name=batch.batch_name, file_size=batch.total_bytes,
+                        direction="INCOMING", status=status,
+                        started_at=incoming.meta.created_at, sha256="",
+                    )
+                    self._notify_transfer_complete(
+                        batch_id, batch_success, batch.batch_name, "INCOMING"
+                    )
+                    self.notifications.transfer_complete(
+                        batch.batch_name, batch_success, "INCOMING"
+                    )
 
     async def _on_transfer_cancel(self, ps: "PeerSession", transfer_id: str, reason: str) -> None:
         logger.info(

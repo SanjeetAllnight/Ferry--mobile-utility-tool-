@@ -1,61 +1,58 @@
 package dev.ferry.app.ui.theme
 
 import android.app.Activity
-import android.os.Build
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.dynamicDarkColorScheme
-import androidx.compose.material3.dynamicLightColorScheme
-import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.SideEffect
 import androidx.compose.ui.graphics.toArgb
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.core.view.WindowCompat
 
-private val DarkColorScheme = darkColorScheme(
-    primary = DarkPrimary,
-    primaryContainer = DarkPrimaryContainer,
-    onPrimaryContainer = DarkOnPrimaryContainer,
-    secondary = SecondaryTeal,
-    background = DarkBackground,
-    surface = DarkSurface,
-    onSurface = DarkOnSurface
-)
-
-private val LightColorScheme = lightColorScheme(
-    primary = PrimaryBlue,
-    onPrimary = OnPrimaryBlue,
-    primaryContainer = PrimaryContainerBlue,
-    onPrimaryContainer = OnPrimaryContainerBlue,
-    secondary = SecondaryTeal,
-    onSecondary = OnSecondaryTeal,
-    secondaryContainer = SecondaryContainerTeal,
-    onSecondaryContainer = OnSecondaryContainerTeal
+// Enforce a strict dark monochrome theme regardless of system setting
+private val FerryColorScheme = darkColorScheme(
+    primary = Primary,
+    onPrimary = OnPrimary,
+    primaryContainer = SurfaceContainerHighest,
+    onPrimaryContainer = OnSurface,
+    secondary = Secondary,
+    onSecondary = OnSecondary,
+    secondaryContainer = SurfaceContainerHigh,
+    onSecondaryContainer = OnSurface,
+    tertiary = Primary,
+    onTertiary = OnPrimary,
+    tertiaryContainer = SurfaceContainerLow,
+    onTertiaryContainer = OnSurface,
+    background = Background,
+    onBackground = OnBackground,
+    surface = Surface,
+    onSurface = OnSurface,
+    surfaceVariant = SurfaceVariant,
+    onSurfaceVariant = OnSurfaceVariant,
+    outline = Outline,
+    outlineVariant = OutlineVariant,
+    error = Error,
+    onError = OnError,
+    errorContainer = SurfaceContainerHighest,
+    onErrorContainer = Error
 )
 
 @Composable
 fun FerryTheme(
-    darkTheme: Boolean = isSystemInDarkTheme(),
-    dynamicColor: Boolean = true,
+    darkTheme: Boolean = isSystemInDarkTheme(), // Ignored, always dark
+    dynamicColor: Boolean = false, // Ignored, always strict palette
     content: @Composable () -> Unit
 ) {
-    val colorScheme = when {
-        dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
-            val context = LocalContext.current
-            if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
-        }
-        darkTheme -> DarkColorScheme
-        else -> LightColorScheme
-    }
+    val colorScheme = FerryColorScheme
     val view = LocalView.current
     if (!view.isInEditMode) {
         SideEffect {
             val window = (view.context as Activity).window
             window.statusBarColor = colorScheme.background.toArgb()
-            WindowCompat.getInsetsController(window, view).isAppearanceLightStatusBars = !darkTheme
+            window.navigationBarColor = colorScheme.background.toArgb()
+            WindowCompat.getInsetsController(window, view).isAppearanceLightStatusBars = false
+            WindowCompat.getInsetsController(window, view).isAppearanceLightNavigationBars = false
         }
     }
 
