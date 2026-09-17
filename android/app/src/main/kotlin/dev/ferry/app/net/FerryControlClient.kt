@@ -125,6 +125,10 @@ class FerryControlClient(
     /** Incoming transfer progress; null when idle. */
     val incomingTransferProgress: StateFlow<TransferProgress?> = _incomingProgress.asStateFlow()
 
+    private val _pendingIncomingRequest = MutableStateFlow<TransferMetadata?>(null)
+    /** Pending incoming transfer metadata requiring user acceptance. */
+    val pendingIncomingRequest: StateFlow<TransferMetadata?> = _pendingIncomingRequest.asStateFlow()
+
     private val _transferHistory = MutableStateFlow<List<TransferHistoryEntry>>(emptyList())
     /** Most-recent-first list of completed transfers. */
     val transferHistory: StateFlow<List<TransferHistoryEntry>> = _transferHistory.asStateFlow()
@@ -139,6 +143,8 @@ class FerryControlClient(
 
     /** Whether clipboard sync is enabled by the user. */
     @Volatile var clipboardSyncEnabled: Boolean = false
+    /** Whether incoming transfers should be automatically accepted. */
+    @Volatile var autoAcceptTransfers: Boolean = false
     /** Last text pushed *to* the peer — loop guard. */
     @Volatile private var lastClipboardSent: String = ""
     /** Last text received *from* the peer — loop guard. */
@@ -168,6 +174,7 @@ class FerryControlClient(
     // CompletableDeferred for TRANSFER_ACCEPT/REJECT: resolved by the session loop
     @Volatile private var pendingTransferAccept: CompletableDeferred<Boolean>? = null
     @Volatile private var pendingBatchAccept: CompletableDeferred<Boolean>? = null
+    @Volatile private var pendingIncomingTransferAccept: CompletableDeferred<Boolean>? = null
 
     // Cancellation signals for active transfers
     private val outgoingCancelled = java.util.concurrent.atomic.AtomicBoolean(false)
@@ -194,7 +201,67 @@ class FerryControlClient(
     @Volatile private var activeBatchTotalItemsOut: Int = 0
     @Volatile private var activeBatchSentItems: Int = 0
 
+    // Phase 5: notification mirroring
+    /** True when the connected peer has advertised the "notify.v1" capability. */
+    @Volatile var peerSupportsNotify: Boolean = false
+        private set
+
     // ── Public API ────────────────────────────────────────────────────────────
+
+    /**
+     * Send a NOTIFICATION_POST to the peer (Phase 5).
+     * Only sent when session is ESTABLISHED and peer supports notify.v1.
+     * title/body are NOT logged.
+     */
+    fun sendNotificationPost(
+        ferryId: String, packageName: String, appLabel: String,
+        title: String, body: String, postedAt: Long, category: String,
+    ) {
+        val sess = session ?: return
+        val out  = activeOutput ?: return
+        if (sess.state != FerrySession.State.ESTABLISHED) return
+        scope.launch {
+            try {
+                sendEncryptedMessage(
+                    sess, out,
+                    ProtocolConstants.MessageTypes.NOTIFICATION_POST,
+                    JSONObject().apply {
+                        put("ferry_id",  ferryId)
+                        put("package",   packageName)
+                        put("app_label", appLabel)
+                        put("title",     title)
+                        put("body",      body)
+                        put("posted_at", postedAt)
+                        put("category",  category)
+                    }
+                )
+            } catch (e: Exception) {
+                Log.d(TAG, "Failed to send NOTIFICATION_POST: ${e.message}")
+            }
+        }
+    }
+
+    /**
+     * Send a NOTIFICATION_REMOVE to the peer (Phase 5).
+     * Only sent when session is ESTABLISHED and peer supports notify.v1.
+     */
+    fun sendNotificationRemove(ferryId: String) {
+        val sess = session ?: return
+        val out  = activeOutput ?: return
+        if (sess.state != FerrySession.State.ESTABLISHED) return
+        scope.launch {
+            try {
+                sendEncryptedMessage(
+                    sess, out,
+                    ProtocolConstants.MessageTypes.NOTIFICATION_REMOVE,
+                    JSONObject().apply { put("ferry_id", ferryId) }
+                )
+            } catch (e: Exception) {
+                Log.d(TAG, "Failed to send NOTIFICATION_REMOVE: ${e.message}")
+            }
+        }
+    }
+
 
     fun cancelOutgoingTransfer(transferId: String? = null) {
         Log.i(TAG, "User requested cancellation of outgoing transfer: $transferId")
@@ -265,6 +332,7 @@ class FerryControlClient(
             _sessionState.value = FerrySession.State.HANDSHAKING
 
             // Step 1: Send HANDSHAKE_INIT
+            val isKnownLocally = trustStore.listPeers().any { it.deviceId == device.deviceId }
             val (_, ephPub, nonce) = sess.buildLocalHandshake(identity.publicKeyBytes)
             val initPayload = JSONObject().apply {
                 put("device_id", device.deviceId)
@@ -273,7 +341,7 @@ class FerryControlClient(
                 put("public_key", identity.publicKeyB64)
                 put("ephemeral_key", bytesToB64(ephPub))
                 put("nonce", bytesToB64(nonce))
-                put("is_paired", false)
+                put("is_paired", isKnownLocally)
             }
             sendPlainFrame(output, ProtocolConstants.MessageTypes.HANDSHAKE_INIT, initPayload)
 
@@ -323,7 +391,10 @@ class FerryControlClient(
             }
             Log.i(TAG, "Auth verified for $remoteDeviceName")
 
-            val isTrusted = trustStore.isKnownPeer(remoteStaticB64)
+            val isTrustedLocally = trustStore.isKnownPeer(remoteStaticB64)
+            val remoteIsPaired = remotePayload.optBoolean("is_paired", false)
+            val isTrusted = isTrustedLocally && remoteIsPaired
+
             if (isTrusted) {
                 connectedPeerStaticB64 = remoteStaticB64
                 sess.transition(FerrySession.State.ESTABLISHED)
@@ -335,6 +406,19 @@ class FerryControlClient(
                     Log.i(TAG, "Found ${interrupted.size} interrupted transfer(s) from $remoteDeviceName")
                     _interruptedTransfers.value = interrupted
                 }
+                
+                // Phase 5: advertise our capabilities to the peer
+                try {
+                    val capsPayload = JSONObject().apply {
+                        val arr = org.json.JSONArray()
+                        arr.put("notify.v1")
+                        put("capabilities", arr)
+                    }
+                    sendEncryptedMessage(sess, output, ProtocolConstants.MessageTypes.CAPABILITIES, capsPayload)
+                } catch (e: Exception) {
+                    Log.d(TAG, "Failed to send CAPABILITIES: ${e.message}")
+                }
+                
                 runEncryptedSessionLoop(sess, input, output)
             } else {
                 sess.transition(FerrySession.State.PAIRING)
@@ -385,6 +469,18 @@ class FerryControlClient(
             persistPendingTrust()
             sess.transition(FerrySession.State.ESTABLISHED)
             _sessionState.value = FerrySession.State.ESTABLISHED
+            
+            // Phase 5: advertise our capabilities to the peer
+            try {
+                val capsPayload = JSONObject().apply {
+                    val arr = org.json.JSONArray()
+                    arr.put("notify.v1")
+                    put("capabilities", arr)
+                }
+                sendEncrypted(sess, ProtocolConstants.MessageTypes.CAPABILITIES, capsPayload)
+            } catch (e: Exception) {
+                Log.d(TAG, "Failed to send CAPABILITIES: ${e.message}")
+            }
         }
 
         scope.launch {
@@ -411,6 +507,16 @@ class FerryControlClient(
         try { sess.transition(FerrySession.State.FAILED) } catch (_: Exception) {}
         _sessionState.value = FerrySession.State.FAILED
         closeSocket()
+    }
+
+    fun acceptIncomingTransfer() {
+        Log.i(TAG, "User accepted incoming transfer")
+        pendingIncomingTransferAccept?.complete(true)
+    }
+
+    fun rejectIncomingTransfer() {
+        Log.i(TAG, "User rejected incoming transfer")
+        pendingIncomingTransferAccept?.complete(false)
     }
 
     private fun persistPendingTrust() {
@@ -753,6 +859,30 @@ class FerryControlClient(
 
             ProtocolConstants.MessageTypes.CLIPBOARD_SYNC_ACK -> { /* no-op */ }
 
+            ProtocolConstants.MessageTypes.CAPABILITIES -> {
+                // Phase 5: parse peer capabilities
+                val caps = mutableListOf<String>()
+                val arr = payload.optJSONArray("capabilities")
+                if (arr != null) {
+                    for (i in 0 until arr.length()) {
+                        caps.add(arr.optString(i, ""))
+                    }
+                }
+                val hadNotify = peerSupportsNotify
+                peerSupportsNotify = caps.contains("notify.v1")
+                Log.i(TAG, "Peer capabilities: $caps (notify.v1=${peerSupportsNotify})")
+                // If peer now supports notify, flush any buffered notifications
+                if (!hadNotify && peerSupportsNotify) {
+                    dev.ferry.app.notification.FerryNotificationListenerService.dispatcher?.flush()
+                }
+            }
+
+            // Phase 5: Android receives no notification messages from Linux in this direction.
+            ProtocolConstants.MessageTypes.NOTIFICATION_POST,
+            ProtocolConstants.MessageTypes.NOTIFICATION_REMOVE -> {
+                Log.d(TAG, "Received $type from peer (no-op on Android)")
+            }
+
             else -> Log.w(TAG, "Unhandled transfer message type: $type")
         }
     }
@@ -765,7 +895,7 @@ class FerryControlClient(
      * responsible for writing it to the Android ClipboardManager.
      */
     private fun onClipboardSync(payload: JSONObject) {
-        if (!clipboardSyncEnabled) return
+        return // Disabled per final product scope
         val text = payload.optString("text", "")
         if (text.isEmpty() || text == lastClipboardReceived) return
         if (text.toByteArray(Charsets.UTF_8).size > 524_288) {
@@ -784,7 +914,7 @@ class FerryControlClient(
      * last text we sent, or the same text we just received (loop guard).
      */
     fun sendClipboardSync(text: String) {
-        if (!clipboardSyncEnabled) return
+        return // Disabled per final product scope
         if (text.isEmpty()) return
         if (text.toByteArray(Charsets.UTF_8).size > 524_288) return
         if (text == lastClipboardSent) return
@@ -904,9 +1034,41 @@ class FerryControlClient(
                 direction = TransferProgress.Direction.INCOMING,
             )
 
-            sendEncryptedMessage(sess, output, ProtocolConstants.MessageTypes.TRANSFER_ACCEPT,
-                JSONObject().apply { put("transfer_id", meta.transferId) })
-            Log.i(TAG, "TRANSFER_ACCEPT sent for ${meta.fileName}")
+            if (isBatched || autoAcceptTransfers) {
+                sendEncryptedMessage(sess, output, ProtocolConstants.MessageTypes.TRANSFER_ACCEPT,
+                    JSONObject().apply { put("transfer_id", meta.transferId) })
+                Log.i(TAG, "TRANSFER_ACCEPT auto-sent for ${meta.fileName}")
+            } else {
+                Log.i(TAG, "Waiting for user to accept incoming transfer ${meta.fileName}")
+                val acceptDeferred = CompletableDeferred<Boolean>()
+                pendingIncomingTransferAccept = acceptDeferred
+                _pendingIncomingRequest.value = meta
+                
+                scope.launch {
+                    val accepted = try {
+                        kotlinx.coroutines.withTimeout(300_000L) { acceptDeferred.await() }
+                    } catch (e: Exception) {
+                        false
+                    } finally {
+                        pendingIncomingTransferAccept = null
+                        _pendingIncomingRequest.value = null
+                    }
+                    
+                    if (accepted) {
+                        sendEncryptedMessage(sess, output, ProtocolConstants.MessageTypes.TRANSFER_ACCEPT,
+                            JSONObject().apply { put("transfer_id", meta.transferId) })
+                        Log.i(TAG, "TRANSFER_ACCEPT manually sent for ${meta.fileName}")
+                    } else {
+                        activeReceiver?.cancel()
+                        activeReceiver = null
+                        activeReceiverMeta = null
+                        _incomingProgress.value = null
+                        sendEncryptedMessage(sess, output, ProtocolConstants.MessageTypes.TRANSFER_REJECT,
+                            JSONObject().apply { put("transfer_id", meta.transferId); put("reason", "USER_REJECTED") })
+                        Log.i(TAG, "TRANSFER_REJECT manually sent for ${meta.fileName}")
+                    }
+                }
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Invalid TRANSFER_REQUEST: ${e.message}")
             sendEncryptedMessage(sess, output, ProtocolConstants.MessageTypes.TRANSFER_ERROR,

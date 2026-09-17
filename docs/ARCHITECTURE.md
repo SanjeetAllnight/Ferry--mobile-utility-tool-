@@ -141,7 +141,7 @@ All persistent state on Android is stored in app-private storage:
 1. **No Cloud, No Accounts**: Ferry never contacts external servers for telemetry, account authentication, or relay.
 2. **Minimal Third-Party Bloat**: Use platform-native tools and robust standard libraries (Python `asyncio`/`sqlite3`/`gi`, Android `kotlinx.coroutines`/`Jetpack`).
 3. **Resilience**: Network dropouts or app closures must result in deterministic error states without data corruption.
-4. **Extensibility**: The control plane message format is strictly versioned (`protocol_version: 1`), enabling future additions (clipboard, notifications) without breaking core transfer infrastructure.
+4. **Extensibility**: The control plane message format is strictly versioned (`protocol_version: 1`), enabling future additions (notifications) without breaking core transfer infrastructure.
 
 ---
 

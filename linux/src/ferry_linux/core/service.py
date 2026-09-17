@@ -41,6 +41,7 @@ from .transfer import (
 )
 from .clipboard import ClipboardSyncManager
 from .notifications import NotificationManager
+from .notification_bridge import NotificationBridge
 from .ipc import FerryIPCServer
 from ..protocol.models import (
     FerryEnvelope,
@@ -56,6 +57,9 @@ from ..protocol.models import (
     BatchRejectPayload,
     BatchCancelPayload,
     BatchCompletePayload,
+    NotificationPostPayload,
+    NotificationRemovePayload,
+    MAX_NOTIFICATION_FRAME_BYTES,
     decode_frame,
     encode_frame,
 )
@@ -143,9 +147,12 @@ class FerryService:
         # Phase 3D: set of transfer_ids already recorded in history (prevents duplicates)
         self._recorded_transfer_ids: set = set()
         # MVP: Clipboard sync manager
-        self.clipboard_sync = ClipboardSyncManager()
+        # Disabled per final product scope
         # MVP: Notification manager (app reference set by UI layer)
         self.notifications: NotificationManager = NotificationManager()
+        # Phase 5: D-Bus notification bridge for mirrored Android notifications
+        self.notification_bridge: NotificationBridge = NotificationBridge()
+        self.notification_bridge.start()
         # P1: IPC server for local UI clients
         self.ipc_server: FerryIPCServer = FerryIPCServer(self)
 
@@ -162,7 +169,6 @@ class FerryService:
                 except Exception as exc:
                     logger.debug("Failed to send CLIPBOARD_SYNC to %s: %s", peer_id, exc)
 
-        self.clipboard_sync.set_on_send_callback(_send_clipboard_to_peer)
 
     # ------------------------------------------------------------------
     # Public API
@@ -1080,6 +1086,12 @@ class FerryService:
                 self._notify_session_change(ps.remote_addr, SessionState.ESTABLISHED)
                 logger.info("Session ESTABLISHED with %s (%s)", ps.remote_device_name, ps.remote_addr)
 
+                # Phase 5: advertise our capabilities to the peer
+                try:
+                    await self.send_encrypted(ps, MessageType.CAPABILITIES, {"capabilities": ["notify.v1"]})
+                except Exception as _cap_exc:
+                    logger.debug("Failed to send CAPABILITIES: %s", _cap_exc)
+
                 if handshake_done is not None:
                     handshake_done.set()
                 await self._run_session_loop(ps)
@@ -1171,6 +1183,48 @@ class FerryService:
                             self._persist_trust(ps)
                             ps.session.transition(SessionState.ESTABLISHED)
                         self._notify_session_change(ps.remote_addr, ps.session.state)
+                    continue
+
+                # ── Capability exchange ─────────────────────────────────────
+                if envelope.type == MessageType.CAPABILITIES:
+                    caps = envelope.payload.get("capabilities", [])
+                    logger.debug(
+                        "Peer %s advertises capabilities: %s", ps.remote_addr, caps
+                    )
+                    ps.session.peer_capabilities = list(caps)
+                    continue
+
+                # ── Notification mirroring (Phase 5) ────────────────────────
+                if envelope.type == MessageType.NOTIFICATION_POST:
+                    raw = json.dumps(envelope.payload).encode()
+                    if len(raw) > MAX_NOTIFICATION_FRAME_BYTES:
+                        logger.warning(
+                            "NOTIFICATION_POST from %s exceeds 8 KB limit — dropping",
+                            ps.remote_addr,
+                        )
+                        continue
+                    try:
+                        dto = NotificationPostPayload.from_dict(envelope.payload)
+                        self.notification_bridge.post(
+                            ferry_id=dto.ferry_id,
+                            app_label=dto.app_label,
+                            title=dto.title,
+                            body=dto.body,
+                        )
+                    except (ValueError, KeyError) as exc:
+                        logger.warning(
+                            "Malformed NOTIFICATION_POST from %s: %s", ps.remote_addr, exc
+                        )
+                    continue
+
+                if envelope.type == MessageType.NOTIFICATION_REMOVE:
+                    try:
+                        dto = NotificationRemovePayload.from_dict(envelope.payload)
+                        self.notification_bridge.remove(dto.ferry_id)
+                    except (ValueError, KeyError) as exc:
+                        logger.warning(
+                            "Malformed NOTIFICATION_REMOVE from %s: %s", ps.remote_addr, exc
+                        )
                     continue
 
                 logger.debug("Received encrypted message type=%s from %s", envelope.type, ps.remote_addr)
@@ -1322,15 +1376,6 @@ class FerryService:
         elif msg_type == MessageType.BATCH_COMPLETE:
             await self._on_batch_complete(ps, payload.get("batch_id", ""))
 
-        # ── Clipboard Sync ──
-        elif msg_type == MessageType.CLIPBOARD_SYNC:
-            text = payload.get("text", "")
-            if isinstance(text, str) and text:
-                peer_id = ps.remote_addr
-                self.clipboard_sync.on_remote_clipboard(text, peer_id)
-
-        elif msg_type == MessageType.CLIPBOARD_SYNC_ACK:
-            pass  # optional ack — no action needed
 
         else:
             logger.warning("Unhandled message type %s from %s", msg_type, ps.remote_addr)

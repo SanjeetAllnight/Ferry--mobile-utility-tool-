@@ -254,10 +254,17 @@ class FerryIPCServer:
         ))
 
     def on_session_changed(self, remote_addr: str, state) -> None:
-        asyncio.ensure_future(self.broadcast(
-            IPCMessageType.SESSION_UPDATE,
-            {"remote_addr": remote_addr, "state": str(state.name if hasattr(state, "name") else state)},
-        ))
+        payload = {
+            "remote_addr": remote_addr,
+            "state": str(state.name if hasattr(state, "name") else state),
+        }
+        ps = self._service._active_sessions.get(remote_addr)
+        if ps:
+            payload["remote_device_id"] = ps.remote_device_id
+            payload["remote_device_name"] = ps.remote_device_name
+            payload["remote_static_pub_b64"] = ps.remote_static_pub_b64
+
+        asyncio.ensure_future(self.broadcast(IPCMessageType.SESSION_UPDATE, payload))
 
     def on_transfer_request(self, remote_addr: str, transfer_id: str, file_name: str, file_size: int) -> None:
         asyncio.ensure_future(self.broadcast(
@@ -488,7 +495,7 @@ class FerryIPCServer:
             elif msg_type == IPCMessageType.GET_HISTORY:
                 limit = payload.get("limit", 50)
                 try:
-                    records = svc.db.get_recent_transfers(limit=limit)
+                    records = svc.db.list_transfers(limit=limit)
                     await client.send(IPCMessageType.HISTORY_RESULT, {
                         "records": [
                             {
@@ -510,15 +517,14 @@ class FerryIPCServer:
 
             elif msg_type == IPCMessageType.GET_TRUSTED_DEVICES:
                 try:
-                    devices = svc.db.get_trusted_devices()
+                    devices = svc.db.list_devices()
                     await client.send(IPCMessageType.TRUSTED_DEVICES_RESULT, {
                         "devices": [
                             {
-                                "device_id": d.device_id,
-                                "device_name": d.device_name,
-                                "device_type": d.device_type,
-                                "public_key_b64": d.public_key_b64,
-                                "last_seen": d.last_seen,
+                                "device_id": getattr(d, "device_id", ""),
+                                "device_name": getattr(d, "device_name", ""),
+                                "identity_public_key_b64": getattr(d, "identity_public_key_b64", ""),
+                                "last_seen": getattr(d, "last_seen", 0),
                             }
                             for d in devices
                         ]
@@ -555,13 +561,12 @@ class FerryIPCServer:
                     {
                         "devices": [
                             {
-                                "device_id": d.device_id,
-                                "device_name": d.device_name,
-                                "device_type": d.device_type,
-                                "public_key_b64": d.public_key_b64,
-                                "last_seen": d.last_seen,
+                                "device_id": getattr(d, "device_id", ""),
+                                "device_name": getattr(d, "device_name", ""),
+                                "identity_public_key_b64": getattr(d, "identity_public_key_b64", ""),
+                                "last_seen": getattr(d, "last_seen", 0),
                             }
-                            for d in svc.db.get_trusted_devices()
+                            for d in svc.db.list_devices()
                         ]
                     }
                 ))

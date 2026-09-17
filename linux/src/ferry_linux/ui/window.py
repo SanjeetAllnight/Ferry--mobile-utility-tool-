@@ -99,7 +99,7 @@ class FerryMainWindow(Adw.ApplicationWindow):
         pref_group = Adw.PreferencesGroup()
         pref_group.set_title("System Status")
         pref_group.set_description("Local daemon and connectivity state")
-        # content_box.append(pref_group)  # Hidden for ultra-minimal polish
+        content_box.append(pref_group)
 
         service_row = Adw.ActionRow()
         service_row.set_title("Ferry Core Discovery Service")
@@ -146,18 +146,6 @@ class FerryMainWindow(Adw.ApplicationWindow):
         self.history_group.set_description("Recent completed file transfers")
         content_box.append(self.history_group)
         self._history_rows: list = []
-
-        # ── Clipboard Sync row in System Status ───────────────────────────
-        self._clipboard_switch = Gtk.Switch()
-        self._clipboard_switch.set_valign(Gtk.Align.CENTER)
-        self._clipboard_switch.connect("state-set", self._on_clipboard_switch_changed)
-        clipboard_row = Adw.ActionRow()
-        clipboard_row.set_title("Clipboard Sync")
-        clipboard_row.set_subtitle("Sync text clipboard with trusted peer")
-        clipboard_row.set_icon_name("edit-paste-symbolic")
-        clipboard_row.add_suffix(self._clipboard_switch)
-        clipboard_row.set_activatable_widget(self._clipboard_switch)
-        pref_group.add(clipboard_row)
 
         # ── Diagnostics (collapsible) ──────────────────────────────
         diag_row = Adw.ExpanderRow()
@@ -247,20 +235,33 @@ class FerryMainWindow(Adw.ApplicationWindow):
                 badge.add_css_class("success")
                 row.add_suffix(badge)
 
-                send_btn = Gtk.Button(label="Send")
-                send_btn.set_valign(Gtk.Align.CENTER)
-                send_btn.add_css_class("suggested-action")
-                send_btn.set_icon_name("document-send-symbolic")
+                box = Gtk.Box(spacing=8, valign=Gtk.Align.CENTER)
+                
+                send_files_btn = Gtk.Button(label="Send Files")
+                send_files_btn.add_css_class("suggested-action")
+                send_files_btn.set_icon_name("document-send-symbolic")
+                
+                send_folder_btn = Gtk.Button(label="Send Folder")
+                send_folder_btn.set_icon_name("folder-open-symbolic")
+                
                 remote_addr = next(
                     (addr for addr, ps in established.items()
                      if ps.get("remote_device_id") == dev_id or addr == dev_id),
                     None,
                 )
-                send_btn.connect(
+                
+                send_files_btn.connect(
                     "clicked",
-                    lambda _btn, ra=remote_addr: self._launch_file_dialog(ra),
+                    lambda _btn, ra=remote_addr: self._launch_multiple_file_dialog(ra),
                 )
-                row.add_suffix(send_btn)
+                send_folder_btn.connect(
+                    "clicked",
+                    lambda _btn, ra=remote_addr: self._launch_folder_dialog(ra),
+                )
+                
+                box.append(send_files_btn)
+                box.append(send_folder_btn)
+                row.add_suffix(box)
 
             if in_db:
                 unpair_btn = Gtk.Button()
@@ -277,8 +278,10 @@ class FerryMainWindow(Adw.ApplicationWindow):
 
     def _update_trusted_devices(self) -> bool:
         app = self.get_application()
-        if not app or getattr(app, "service", None) is None:
+        if not app:
             return False
+        app.get_trusted_devices()
+        return False
         
         try:
             devices = app.service.db.list_devices()
@@ -290,9 +293,8 @@ class FerryMainWindow(Adw.ApplicationWindow):
 
     def _on_unpair_clicked_pk(self, pubkey: str) -> None:
         app = self.get_application()
-        if app and app.service:
-            app.service.db.remove_device_by_public_key(pubkey)
-            self._update_trusted_devices()
+        if app:
+            app.remove_trusted_device(pubkey)
 
     # ── Nearby (untrusted) devices ────────────────────────────────────────────
 
@@ -321,13 +323,23 @@ class FerryMainWindow(Adw.ApplicationWindow):
 
             for dev in devices:
                 row = Adw.ActionRow()
-                row.set_title(dev.device_name)
-                addr_str = dev.addresses[0] if dev.addresses else "Unknown Address"
+                
+                # Handle both object and dict (IPC) types
+                is_dict = isinstance(dev, dict)
+                device_name = dev.get("device_name", "Unknown") if is_dict else dev.device_name
+                addresses = dev.get("addresses", []) if is_dict else dev.addresses
+                port = dev.get("port", 0) if is_dict else dev.port
+                os_name = dev.get("os_name", "unknown") if is_dict else dev.os_name
+                protocol_version = dev.get("protocol_version", 1) if is_dict else dev.protocol_version
+                device_type = dev.get("device_type", "desktop") if is_dict else dev.device_type
+                
+                row.set_title(device_name)
+                addr_str = addresses[0] if addresses else "Unknown Address"
                 row.set_subtitle(
-                    f"{addr_str}:{dev.port} • OS: {dev.os_name.capitalize()} "
-                    f"• Protocol v{dev.protocol_version}"
+                    f"{addr_str}:{port} • OS: {os_name.capitalize()} "
+                    f"• Protocol v{protocol_version}"
                 )
-                row.set_icon_name("phone-symbolic" if dev.device_type == "mobile" else "computer-symbolic")
+                row.set_icon_name("phone-symbolic" if device_type == "mobile" else "computer-symbolic")
 
                 badge = Gtk.Label(label="Available")
                 badge.add_css_class("accent")
@@ -341,13 +353,13 @@ class FerryMainWindow(Adw.ApplicationWindow):
 
     # ── Session state handler ─────────────────────────────────────────────────
 
-    def handle_session_state(self, remote_addr: str, state: SessionState) -> None:
+    def handle_session_state(self, remote_addr: str, state: str) -> None:
         """Handle session state updates and trigger UI actions."""
         app = self.get_application()
-        if not app or not app.service:
+        if not app:
             return
 
-        if state == SessionState.ESTABLISHED:
+        if state == 'ESTABLISHED':
             self._update_trusted_devices()
             dlg = self._pairing_dialogs.pop(remote_addr, None)
             if dlg:
@@ -359,14 +371,14 @@ class FerryMainWindow(Adw.ApplicationWindow):
             self._send_dir_btn.set_sensitive(True)
             GLib.idle_add(self._update_diagnostics)
 
-        if state in (SessionState.FAILED, SessionState.DISCONNECTED, SessionState.CLOSING):
+        if state in ('FAILED', 'DISCONNECTED', 'CLOSING'):
             self._update_trusted_devices()
             dlg = self._pairing_dialogs.pop(remote_addr, None)
             if dlg:
                 dlg.close()
 
             # Disable send buttons if no established sessions left
-            has_established = len(app.service.established_sessions) > 0
+            has_established = any(s.get('state') == 'ESTABLISHED' for s in getattr(self, '_ipc_sessions', {}).values())
             self._send_btn.set_sensitive(has_established)
             self._send_files_btn.set_sensitive(has_established)
             self._send_dir_btn.set_sensitive(has_established)
@@ -395,41 +407,41 @@ class FerryMainWindow(Adw.ApplicationWindow):
                     GLib.timeout_add(3000, _remove_row_closure)
             self._update_transfer_history()
 
-        if state in (SessionState.PAIRING, SessionState.WAITING_FOR_LOCAL_DECISION):
-            if remote_addr in self._pairing_dialogs:
-                return
+        # pairing dialog is now shown via show_pairing_dialog_ipc -> show_pairing_dialog
 
-            ps = app.service._active_sessions.get(remote_addr)
-            if not ps:
-                return
 
-            sas = ps.session.sas_code
-            dialog = Adw.MessageDialog(
-                transient_for=self,
-                heading=f"Pair with {ps.remote_device_name}?",
-                body=(
-                    f"Verify that the following 6-digit code matches the one "
-                    f"shown on {ps.remote_device_name}:\n\n"
-                    f"<span size='xx-large' weight='bold'>{sas}</span>"
-                ),
-                body_use_markup=True,
-            )
-            dialog.add_response("reject", "Reject")
-            dialog.add_response("accept", "Accept")
-            dialog.set_response_appearance("reject", Adw.ResponseAppearance.DESTRUCTIVE)
-            dialog.set_response_appearance("accept", Adw.ResponseAppearance.SUGGESTED)
+    def show_pairing_dialog(self, remote_addr: str, device_name: str, sas_code: str) -> bool:
+        if remote_addr in self._pairing_dialogs:
+            return False
 
-            def on_response(dlg, response_id):
-                self._pairing_dialogs.pop(remote_addr, None)
-                loop = app.get_loop()
+        dialog = Adw.MessageDialog(
+            transient_for=self,
+            heading=f"Pair with {device_name}?",
+            body=(
+                f"Verify that the following 6-digit code matches the one "
+                f"shown on {device_name}:\n\n"
+                f"<span size='xx-large' weight='bold'>{sas_code}</span>"
+            ),
+            body_use_markup=True,
+        )
+        dialog.add_response("reject", "Reject")
+        dialog.add_response("accept", "Accept")
+        dialog.set_response_appearance("reject", Adw.ResponseAppearance.DESTRUCTIVE)
+        dialog.set_response_appearance("accept", Adw.ResponseAppearance.SUGGESTED)
+
+        def on_response(dlg, response_id):
+            self._pairing_dialogs.pop(remote_addr, None)
+            app = self.get_application()
+            if app:
                 if response_id == "accept":
-                    asyncio.run_coroutine_threadsafe(app.service.accept_pairing(remote_addr), loop)
+                    app.accept_pairing(remote_addr)
                 else:
-                    asyncio.run_coroutine_threadsafe(app.service.reject_pairing(remote_addr), loop)
+                    app.reject_pairing(remote_addr)
 
-            dialog.connect("response", on_response)
-            self._pairing_dialogs[remote_addr] = dialog
-            dialog.present()
+        dialog.connect("response", on_response)
+        self._pairing_dialogs[remote_addr] = dialog
+        dialog.present()
+        return False
 
     # ── Incoming transfer request ─────────────────────────────────────────────
 
@@ -440,13 +452,12 @@ class FerryMainWindow(Adw.ApplicationWindow):
         file_name: str,
         file_size: int,
     ) -> None:
-        """Prompt the user to accept or reject an incoming file transfer."""
         app = self.get_application()
-        if not app or not app.service:
+        if not app:
             return
 
-        ps = app.service._active_sessions.get(remote_addr)
-        device_name = ps.remote_device_name if ps else "Unknown Device"
+        ps = getattr(self, "_ipc_sessions", {}).get(remote_addr, {})
+        device_name = ps.get("remote_device_name", "Unknown Device")
 
         dialog = Adw.MessageDialog(
             transient_for=self,
@@ -468,13 +479,9 @@ class FerryMainWindow(Adw.ApplicationWindow):
             if response_id == "accept":
                 # Add an incoming progress row immediately
                 self._add_transfer_row(transfer_id, file_name, file_size, direction="↓")
-                asyncio.run_coroutine_threadsafe(
-                    app.service.accept_transfer(remote_addr, transfer_id), loop
-                )
+                app.accept_transfer(remote_addr, transfer_id)
             else:
-                asyncio.run_coroutine_threadsafe(
-                    app.service.reject_transfer(remote_addr, transfer_id), loop
-                )
+                app.reject_transfer(remote_addr, transfer_id)
 
         dialog.connect("response", on_response)
         dialog.present()
@@ -485,25 +492,17 @@ class FerryMainWindow(Adw.ApplicationWindow):
         self._check_pending_send()
 
     def _check_pending_send(self) -> None:
-        """If there is a pending send path and an established session, send it."""
         if not self._pending_send_path:
             return
-            
         app = self.get_application()
-        if not app or not app.service:
+        if not app:
             return
-            
-        established = list(app.service.established_sessions.keys())
+        established = [addr for addr, s in getattr(self, "_ipc_sessions", {}).items() if s.get("state") == "ESTABLISHED"]
         if established:
-            # We have an active connection, automatically send!
             remote_addr = established[0]
             path_to_send = self._pending_send_path
             self._pending_send_path = None
-            
-            asyncio.run_coroutine_threadsafe(
-                app.service.send_file(remote_addr, Path(path_to_send)),
-                app.get_loop()
-            )
+            app.send_file_to_peer(remote_addr, path_to_send)
 
     # ── Active transfer progress ──────────────────────────────────────────────
 
@@ -561,12 +560,8 @@ class FerryMainWindow(Adw.ApplicationWindow):
         def _on_cancel_clicked(_btn):
             cancel_btn.set_sensitive(False)
             app = self.get_application()
-            if app and app.service and app.get_loop():
-                import asyncio
-                asyncio.run_coroutine_threadsafe(
-                    app.service.cancel_transfer(transfer_id),
-                    app.get_loop(),
-                )
+            if app:
+                app.cancel_transfer(transfer_id)
 
         cancel_btn.connect("clicked", _on_cancel_clicked)
         row.add_suffix(cancel_btn)
@@ -634,14 +629,18 @@ class FerryMainWindow(Adw.ApplicationWindow):
 
     def _update_transfer_history(self) -> bool:
         app = self.get_application()
-        if not app or not app.service:
+        if app:
+            app.get_history()
+        return False
+        
+    def update_transfer_history_from_db(self, records: list) -> bool:
+        app = self.get_application()
+        if not app:
             return False
 
         for row in self._history_rows:
             self.history_group.remove(row)
         self._history_rows.clear()
-
-        records = app.service.db.list_transfers(limit=20)
 
         if not records:
             empty_row = Adw.ActionRow()
@@ -652,40 +651,44 @@ class FerryMainWindow(Adw.ApplicationWindow):
             return False
 
         for rec in records:
+            is_dict = isinstance(rec, dict)
+            direction = rec.get("direction", "OUTGOING") if is_dict else rec.direction
+            file_name = rec.get("file_name", "Unknown") if is_dict else rec.file_name
+            file_size = rec.get("file_size", 0) if is_dict else rec.file_size
+            status = rec.get("status", "UNKNOWN") if is_dict else rec.status
+            
             row = Adw.ActionRow()
-            direction_icon = "↓" if rec.direction == "INCOMING" else "↑"
-            row.set_title(f"{direction_icon}  {rec.file_name}")
+            direction_icon = "↓" if direction == "INCOMING" else "↑"
+            row.set_title(f"{direction_icon}  {file_name}")
             row.set_subtitle(
-                f"{rec.direction.capitalize()} • {self._format_size(rec.file_size)} • "
-                f"{rec.status.capitalize()}"
+                f"{direction.capitalize()} • {self._format_size(file_size)} • "
+                f"{status.capitalize()}"
             )
             row.set_icon_name(
-                "document-save-symbolic" if rec.direction == "INCOMING"
+                "document-save-symbolic" if direction == "INCOMING"
                 else "document-send-symbolic"
             )
 
             status_label = Gtk.Label(
-                label="✓" if rec.status == "COMPLETED" else "✗" if rec.status in ("FAILED", "CANCELLED") else "⏸"
+                label="✓" if status == "COMPLETED" else "✗" if status in ("FAILED", "CANCELLED") else "⏸"
             )
             status_label.add_css_class(
-                "success" if rec.status == "COMPLETED" else "error" if rec.status in ("FAILED", "CANCELLED") else "warning"
+                "success" if status == "COMPLETED" else "error" if status in ("FAILED", "CANCELLED") else "warning"
             )
             row.add_suffix(status_label)
             
-            if rec.status == "INTERRUPTED" and rec.direction == "INCOMING":
+            transfer_id = rec.get("transfer_id", "") if is_dict else rec.transfer_id
+            if status == "INTERRUPTED" and direction == "INCOMING":
                 resume_btn = Gtk.Button(label="Resume")
                 resume_btn.add_css_class("suggested-action")
                 resume_btn.set_valign(Gtk.Align.CENTER)
-                def _on_resume_clicked(_btn, tid=rec.transfer_id):
-                    established = list(app.service.established_sessions.keys())
+                def _on_resume_clicked(_btn, tid=transfer_id):
+                    established = [addr for addr, s in getattr(self, "_ipc_sessions", {}).items() if s.get("state") == "ESTABLISHED"]
                     if not established:
                         self._show_error_toast("No active connection to peer to resume")
                         return
                     remote_addr = established[0]
-                    asyncio.run_coroutine_threadsafe(
-                        app.service.request_resume(remote_addr, tid),
-                        app.get_loop()
-                    )
+                    app.request_resume(remote_addr, tid)
                 resume_btn.connect("clicked", _on_resume_clicked)
                 row.add_suffix(resume_btn)
 
@@ -697,34 +700,20 @@ class FerryMainWindow(Adw.ApplicationWindow):
     # ── Send File ─────────────────────────────────────────────────────────────
 
     def on_peers_updated(self) -> None:
-        """Update peer list when discovery or session state changes."""
-        app = self.get_application()
-        if not app or not app.service:
-            return
-
-        # Enable send buttons if we have at least one ESTABLISHED session
-        has_established = len(app.service.established_sessions) > 0
+        has_established = any(s.get('state') == 'ESTABLISHED' for s in getattr(self, '_ipc_sessions', {}).values())
         self._send_btn.set_sensitive(has_established)
         self._send_files_btn.set_sensitive(has_established)
         self._send_dir_btn.set_sensitive(has_established)
 
     def _on_send_file_clicked(self, _btn) -> None:
-        """Send File header button: pick the first ESTABLISHED peer."""
-        app = self.get_application()
-        if not app or not app.service:
-            return
-        established = app.service.established_sessions
+        established = [addr for addr, s in getattr(self, "_ipc_sessions", {}).items() if s.get("state") == "ESTABLISHED"]
         if not established:
             return
         remote_addr = next(iter(established))
         self._launch_file_dialog(remote_addr)
 
     def _on_send_multiple_files_clicked(self, _btn) -> None:
-        """Send Files (multiple) header button — opens a multi-select file dialog."""
-        app = self.get_application()
-        if not app or not app.service:
-            return
-        established = app.service.established_sessions
+        established = [addr for addr, s in getattr(self, "_ipc_sessions", {}).items() if s.get("state") == "ESTABLISHED"]
         if not established:
             return
         remote_addr = next(iter(established))
@@ -760,20 +749,12 @@ class FerryMainWindow(Adw.ApplicationWindow):
             return
 
         app = self.get_application()
-        if not app or not app.service or not app.get_loop():
+        if not app:
             return
 
         batch_name = f"{len(paths)} files"
 
-        async def _do_send_batch():
-            try:
-                success = await app.service.send_batch(remote_addr, paths, batch_name)
-                msg = f"Sent {len(paths)} files" if success else f"Batch send failed"
-                GLib.idle_add(self._show_error_toast, msg)
-            except Exception as exc:
-                GLib.idle_add(self._show_error_toast, f"Batch error: {exc}")
-
-        asyncio.run_coroutine_threadsafe(_do_send_batch(), app.get_loop())
+        app.send_batch_to_peer(remote_addr, [str(p) for p in paths], batch_name)
 
     def _on_settings_clicked(self, _btn) -> None:
         """Open a simple settings dialog showing current config."""
@@ -826,7 +807,7 @@ class FerryMainWindow(Adw.ApplicationWindow):
             return
 
         app = self.get_application()
-        if not app or not app.service or not app.get_loop():
+        if not app:
             return
 
         # Add outgoing progress row immediately
@@ -835,31 +816,19 @@ class FerryMainWindow(Adw.ApplicationWindow):
         transfer_id = str(_uuid.uuid4())
         self._add_transfer_row(transfer_id, file_path.name, file_size, direction="↑")
 
-        async def _do_send():
-            try:
-                success = await app.service.send_file(remote_addr, file_path, transfer_id=transfer_id)
-                GLib.idle_add(
-                    self.handle_transfer_complete,
-                    transfer_id, success, file_path.name, "OUTGOING",
-                )
-            except Exception as exc:
-                GLib.idle_add(
-                    self.handle_transfer_complete,
-                    transfer_id, False, file_path.name, "OUTGOING",
-                )
-
-        asyncio.run_coroutine_threadsafe(_do_send(), app.get_loop())
+        app.send_file_to_peer(remote_addr, str(file_path))
 
     def _on_send_dir_clicked(self, _btn) -> None:
-        """Send Folder header button: pick the first ESTABLISHED peer."""
-        app = self.get_application()
-        if not app or not app.service:
-            return
-        established = app.service.established_sessions
+        established = [addr for addr, s in getattr(self, "_ipc_sessions", {}).items() if s.get("state") == "ESTABLISHED"]
         if not established:
             return
         remote_addr = next(iter(established))
-        
+        self._launch_folder_dialog(remote_addr)
+
+    def _launch_folder_dialog(self, remote_addr: Optional[str]) -> None:
+        """Open a folder-chooser dialog and send selected folder(s) as a batch to remote_addr."""
+        if not remote_addr:
+            return
         dialog = Gtk.FileDialog()
         dialog.set_title("Choose a folder to send")
         dialog.select_multiple_folders(self, None, self._on_folder_chosen, remote_addr)
@@ -883,24 +852,14 @@ class FerryMainWindow(Adw.ApplicationWindow):
             return
 
         app = self.get_application()
-        if not app or not app.service or not app.get_loop():
+        if not app:
             return
 
         batch_name = paths[0].name
         if len(paths) > 1:
             batch_name += f" and {len(paths) - 1} others"
 
-        async def _do_send_batch():
-            try:
-                success = await app.service.send_batch(remote_addr, paths, batch_name)
-                msg = f"Batch '{batch_name}' sent successfully" if success else f"Batch '{batch_name}' failed"
-                GLib.idle_add(self._show_error_toast, msg)
-            except Exception as exc:
-                print(f"Batch send error: {exc}")
-                GLib.idle_add(self._show_error_toast, f"Batch error: {exc}")
-
-        # Fire and forget the async task
-        asyncio.run_coroutine_threadsafe(_do_send_batch(), app.get_loop())
+        app.send_batch_to_peer(remote_addr, [str(p) for p in paths], batch_name)
 
     # ── Toast helpers ─────────────────────────────────────────────────────────
 
@@ -923,73 +882,7 @@ class FerryMainWindow(Adw.ApplicationWindow):
             size_bytes /= 1024.0
         return f"{size_bytes:.1f} TB"
 
-    # ── Clipboard Sync ────────────────────────────────────────────────────────
-
-    def _on_clipboard_switch_changed(self, switch: Gtk.Switch, state: bool) -> bool:
-        """Enable/disable clipboard sync in the service."""
-        app = self.get_application()
-        if app and app.service:
-            app.service.clipboard_sync.set_enabled(state)
-            if state:
-                # Wire the write-local callback (GTK clipboard write)
-                app.service.clipboard_sync.set_on_write_local_callback(
-                    self._write_clipboard_text
-                )
-                # Start polling local clipboard
-                self._start_clipboard_polling()
-        return False  # don't prevent switch state change
-
-    def _write_clipboard_text(self, text: str) -> None:
-        """Write text to the local GTK clipboard."""
-        try:
-            clipboard = self.get_clipboard()
-            clipboard.set(text)
-        except Exception as exc:
-            import logging
-            logging.getLogger("ferry.ui").debug("Failed to write clipboard: %s", exc)
-
-    def _start_clipboard_polling(self) -> None:
-        """Poll the GTK clipboard every 1.5 s and forward changes to peers."""
-        self._last_polled_clipboard: str = ""
-
-        def _poll():
-            app = self.get_application()
-            if not app or not app.service:
-                return False
-            if not app.service.clipboard_sync.enabled:
-                return False  # Stop polling if disabled
-
-            # Read clipboard asynchronously
-            clipboard = self.get_clipboard()
-            clipboard.read_text_async(None, self._on_clipboard_read_done)
-            return True  # keep polling
-
         GLib.timeout_add(1500, _poll)
-
-    def _on_clipboard_read_done(self, clipboard, result) -> None:
-        """Callback when clipboard text is available."""
-        try:
-            text = clipboard.read_text_finish(result)
-        except Exception:
-            return
-        if not text or text == getattr(self, "_last_polled_clipboard", ""):
-            return
-        self._last_polled_clipboard = text
-
-        app = self.get_application()
-        if not app or not app.service or not app.service.clipboard_sync.enabled:
-            return
-
-        # Forward to all established peers
-        established = app.service.established_sessions
-        for peer_id in list(established.keys()):
-            import asyncio
-            asyncio.run_coroutine_threadsafe(
-                app.service.clipboard_sync.on_local_clipboard_changed(text, peer_id),
-                app.get_loop(),
-            )
-
-    # ── Drag-and-Drop handlers ────────────────────────────────────────────────
 
     def _on_drop_accept(self, drop_target, drop) -> bool:
         """Accept DnD drops that carry file lists."""
@@ -1007,7 +900,7 @@ class FerryMainWindow(Adw.ApplicationWindow):
         """Handle a completed DnD drop of a Gdk.FileList."""
         self.remove_css_class("drop-target-active")
         app = self.get_application()
-        if not app or not app.service or not app.get_loop():
+        if not app:
             return False
 
         established = app.service.established_sessions
@@ -1041,33 +934,36 @@ class FerryMainWindow(Adw.ApplicationWindow):
             transfer_id = str(_uuid.uuid4())
             self._add_transfer_row(transfer_id, file_path.name, file_size, direction="\u2191")
 
-            async def _send():
-                success = await app.service.send_file(remote_addr, file_path, transfer_id=transfer_id)
-                GLib.idle_add(self.handle_transfer_complete, transfer_id, success, file_path.name, "OUTGOING")
-
-            asyncio.run_coroutine_threadsafe(_send(), app.get_loop())
+            app.send_file_to_peer(remote_addr, str(file_path))
         else:
             # Multiple files or a folder \u2014 use batch
             batch_name = paths[0].name if len(paths) == 1 else f"{len(paths)} dropped items"
 
-            async def _send_batch():
-                success = await app.service.send_batch(remote_addr, paths, batch_name)
-                GLib.idle_add(
-                    self._show_error_toast,
-                    f"Batch sent: {batch_name}" if success else f"Batch failed: {batch_name}",
-                )
-
-            asyncio.run_coroutine_threadsafe(_send_batch(), app.get_loop())
+            app.send_batch_to_peer(remote_addr, [str(p) for p in paths], batch_name)
 
         return True
 
     # ── Diagnostics ───────────────────────────────────────────────────────────
 
     def _update_diagnostics(self) -> bool:
-        """Populate the diagnostics expander rows from the live service state."""
         app = self.get_application()
-        if not app or not app.service:
+        if not app:
             return False
+
+        identity_key = getattr(app, "_daemon_identity_prefix", "")
+        if identity_key:
+            self._diag_identity_row.set_subtitle(identity_key)
+
+        established = [s for s in getattr(self, "_ipc_sessions", {}).values() if s.get("state") == "ESTABLISHED"]
+        if established:
+            ps = established[0]
+            peer_name = ps.get("remote_device_name", "Unknown")
+            addr = ps.get("remote_addr", "Unknown IP")
+            self._diag_peer_row.set_subtitle(f"{peer_name} - {addr} (ESTABLISHED)")
+        else:
+            self._diag_peer_row.set_subtitle("Not connected")
+
+        return False
 
         try:
             identity_key = app.service.identity.public_key_b64
@@ -1106,7 +1002,9 @@ class FerryMainWindow(Adw.ApplicationWindow):
     def update_discovered_devices_ipc(self, devices: list) -> None:
         GLib.idle_add(self.update_discovered_devices, devices)
 
-    def handle_session_state_ipc(self, remote_addr: str, state_name: str) -> None:
+    def handle_session_state_ipc(self, payload: dict) -> None:
+        remote_addr = payload.get("remote_addr", "")
+        state_name = payload.get("state", "")
         if not hasattr(self, "_ipc_sessions"):
             self._ipc_sessions = {}
         if state_name == "DISCONNECTED":
@@ -1114,7 +1012,10 @@ class FerryMainWindow(Adw.ApplicationWindow):
         else:
             if remote_addr not in self._ipc_sessions:
                 self._ipc_sessions[remote_addr] = {"remote_addr": remote_addr}
-            self._ipc_sessions[remote_addr]["state"] = state_name
+            
+            for key, val in payload.items():
+                self._ipc_sessions[remote_addr][key] = val
+                
         GLib.idle_add(self.handle_session_state, remote_addr, state_name)
 
     def handle_transfer_request_ipc(self, remote_addr: str, transfer_id: str, file_name: str, file_size: int) -> None:
@@ -1129,8 +1030,6 @@ class FerryMainWindow(Adw.ApplicationWindow):
     def show_pairing_dialog_ipc(self, remote_addr: str, device_name: str, sas_code: str) -> None:
         GLib.idle_add(self.show_pairing_dialog, remote_addr, device_name, sas_code)
 
-    def handle_clipboard_incoming(self, text: str) -> None:
-        pass  # Clipboard Sync UI was removed in final polish
 
     def update_transfer_history_records(self, records: list) -> None:
         GLib.idle_add(self.update_transfer_history_from_db, records)

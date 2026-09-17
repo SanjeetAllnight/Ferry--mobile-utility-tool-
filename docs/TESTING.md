@@ -127,15 +127,17 @@ cd android && ./gradlew testDebugUnitTest
     - `prepare_resume_request()` on valid `.part` file
     - `prepare_resume_request()` uses actual on-disk size (authoritative)
     - `prepare_resume_request()` computes SHA-256 by streaming from disk (not from in-memory accumulator)
-    - Missing `.part` file raises `FileNotFoundError`
+  - Missing `.part` file raises `FileNotFoundError`
     - Calling `prepare_resume_request()` in non-INTERRUPTED states raises `RuntimeError`
     - Partial-file boundary validation (unaligned bytes raise `ValueError`, no truncation or padding)
     - Large `.part` streaming without whole-file loading (bounded 64 KiB reads verified)
     - Zero-byte partial file on disk raises `ValueError`
     - Inconsistent DB metadata raises `ValueError`
     - Service layer message dispatch routes resume messages without unhandled errors
-  - **261 total tests: 204 Linux + 57 Android, all passing.**
-  - See `docs/PHASE_3E_TASK2_REPORT.md` for full implementation log.
+* **Session State Propagation Fix**:
+  - Added `test_ui_state_propagation.py` with 2 tests verifying that `IPC_SESSION_UPDATE` carries required UI identity fields.
+  - **263 total tests: 225 Linux + 57 Android, all passing.**
+  - See `docs/SESSION_STATE_FIX_REPORT.md` for full bug fix report.
 
 ---
 

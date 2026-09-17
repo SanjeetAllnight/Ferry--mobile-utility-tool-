@@ -51,6 +51,13 @@ object ProtocolConstants {
         // Clipboard Sync (MVP Final Sprint)
         const val CLIPBOARD_SYNC = "CLIPBOARD_SYNC"
         const val CLIPBOARD_SYNC_ACK = "CLIPBOARD_SYNC_ACK"
+
+        // Capability negotiation (Phase 5)
+        const val CAPABILITIES = "CAPABILITIES"
+
+        // Notification Mirroring (Phase 5)
+        const val NOTIFICATION_POST   = "NOTIFICATION_POST"
+        const val NOTIFICATION_REMOVE = "NOTIFICATION_REMOVE"
     }
 
     object ErrorCodes {

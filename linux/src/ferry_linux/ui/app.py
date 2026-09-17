@@ -130,7 +130,7 @@ class FerryApplication(Adw.Application):
         self.ipc.on("transfer_progress",  self._on_transfer_progress)
         self.ipc.on("transfer_complete",  self._on_transfer_complete)
         self.ipc.on("pairing_request",    self._on_pairing_request)
-        self.ipc.on("clipboard_incoming", self._on_clipboard_incoming)
+        pass # clipboard removed
         self.ipc.on("history_result",     self._on_history_result)
         self.ipc.on("trusted_devices",    self._on_trusted_devices_result)
 
@@ -198,10 +198,8 @@ class FerryApplication(Adw.Application):
             self.window.update_discovered_devices_ipc(devices)
 
     def _on_session_update(self, payload: dict) -> None:
-        remote_addr = payload.get("remote_addr", "")
-        state_name = payload.get("state", "")
         if self.window:
-            self.window.handle_session_state_ipc(remote_addr, state_name)
+            self.window.handle_session_state_ipc(payload)
 
     def _on_transfer_request(self, payload: dict) -> None:
         remote_addr = payload.get("remote_addr", "")

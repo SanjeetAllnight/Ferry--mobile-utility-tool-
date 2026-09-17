@@ -10,7 +10,7 @@ This document is the primary persistent context file for **Ferry**. It reflects 
 
 ### Phase 4 Progress Tracking:
 - **Phase 4A / 4B / 4C (Multi-File, Share Integration, Batch Transfers)**: Complete. Native Android Share sheet, Linux GTK batch folder send, Android `sendBatch()`. **Critical bug fixed:** Android `onBatchRequest()` was rejecting all incoming batches — now auto-accepts and tracks active batch ID so sequential TRANSFER_REQUESTs within a batch are accepted.
-- **MVP Final Sprint**: Complete. Clipboard sync (bidirectional, both platforms), desktop notifications (GLib.Notification), systemd user service, `.desktop` entry, install script. See `docs/FINAL_MVP_IMPLEMENTATION_REPORT.md`.
+- **MVP Final Sprint**: Complete. Desktop notifications (GLib.Notification), systemd user service, `.desktop` entry, install script. See `docs/FINAL_MVP_IMPLEMENTATION_REPORT.md`.
 - **MVP Completion Sprint**: Complete. See Section 3 below for full feature list.
 
 ### Previous Phase: Phase 3 (File Transfer Execution)
@@ -113,12 +113,6 @@ This document is the primary persistent context file for **Ferry**. It reflects 
   - Android `onBatchCancel()` / `onBatchComplete()` clear active batch state.
   - Linux `send_batch()` sends batch metadata, iterates files sequentially, sends `BATCH_COMPLETE`.
   - Linux GTK4 "Send Folder" button in header bar via `Gtk.FileDialog.select_multiple_folders`.
-* [x] **Clipboard Sync (MVP Final Sprint)**:
-  - Protocol: `CLIPBOARD_SYNC` and `CLIPBOARD_SYNC_ACK` message types on both platforms.
-  - Linux `ClipboardSyncManager` with loop guard, 512 KiB limit, enable/disable toggle.
-  - Linux GTK clipboard polling (1.5 s) via `GLib.timeout_add` + `read_text_async`.
-  - Android `remoteClipboard` StateFlow — incoming text written to `ClipboardManager` via `LaunchedEffect`.
-  - Android clipboard toggle card in FerryApp (visible only when ESTABLISHED).
 * [x] **Desktop Notifications (MVP Final Sprint)**:
   - Linux `NotificationManager` wrapping `GLib.Notification`.
   - Fires on incoming transfer request and transfer completion.
@@ -134,12 +128,13 @@ This document is the primary persistent context file for **Ferry**. It reflects 
   - **Batch progress overlay**: `TransferProgress.BatchInfo` added; status text shows "Sending batch 2/5: photo.jpg (73%)" during multi-file sends.
   - **Linux drag-and-drop**: GTK4 `Gdk.FileList` drop target on the main scrolled window; single-file drops send directly; multi-file/folder drops use `send_batch`.
   - **Linux "Send Files" multi-select button**: `Gtk.FileDialog.open_multiple` lets users pick multiple individual files to send as a batch without needing a folder.
-  - **Settings dialog**: Gear button in header bar shows current config (device name, port, download dir, auto-accept).
+- **Settings dialog**: Gear button in header bar shows current config (device name, port, download dir, auto-accept).
   - **Diagnostics expander**: Collapsible row in System Status shows local identity key prefix, connected peer name/address, and mDNS status.
   - **`--send FILE` CLI flag**: `python3 -m ferry_linux --send /path/to/file` queues file(s) for sending; fires when a peer connects.
   - **Nautilus script** (`linux/scripts/nautilus/send_via_ferry.sh`): Right-click → Scripts → Send via Ferry integration.
   - **`FerryService.config`/`identity` public**: Settings and diagnostics now read directly from service.
   - **Stale "Phase 3C" UI label removed** from status banner.
+  - **Linux GTK State Propagation Bug Fixed**: Corrected the `IPC_SESSION_UPDATE` payload to include identity fields (`remote_device_id`), resolving the issue where dynamically established connections failed to show the "Connected" label and "Send Files" / "Send Folder" actions for trusted devices.
   - **219/219 Linux tests pass** (1 pre-existing port-reuse flaky). **Android `assembleDebug` + `testDebugUnitTest` both succeed.**
 
 ---
@@ -208,8 +203,14 @@ adb shell am start -n dev.ferry.app/.MainActivity
 | 4 | Multi-file: Share 3 files from Files app → Ferry | All 3 files received, batch progress shows "2/3" |
 | 5 | Folder drag-and-drop onto Linux Ferry window | Batch send initiated, recursive subfolder files included |
 | 6 | Background transfer: start transfer, background app | Transfer continues, foreground notification visible |
-| 7 | Clipboard sync | Toggle on, copy text on Android, verify it appears on Linux |
 | 8 | Desktop notification | Incoming transfer on Linux shows GNOME notification |
 | 9 | Systemd service | Run `linux/install_integration.sh`, log out/in, verify daemon starts |
 | 10 | Nautilus script | Right-click → Scripts → "Send via Ferry", file sends |
 
+
+## Phase 5: Notification Mirroring (Pending Physical QA)
+- `NotificationListenerService` pipeline implemented.
+- `NotificationBridge` (DBus org.freedesktop.Notifications) implemented.
+- Protocol expanded with `CAPABILITIES` and `NOTIFICATION_POST/REMOVE`.
+- UI pairing fixed to remove 'Reject' when only in 'PAIRING' state.
+- **Next Step:** User must perform physical device validation of notifications and pairing.

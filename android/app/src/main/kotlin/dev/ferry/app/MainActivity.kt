@@ -11,6 +11,8 @@ import dev.ferry.app.net.FerryTrustStore
 import dev.ferry.app.security.FerryIdentity
 import dev.ferry.app.ui.FerryApp
 import dev.ferry.app.ui.theme.FerryTheme
+import dev.ferry.app.notification.FerryNotificationListenerService
+import dev.ferry.app.notification.NotificationDispatcher
 import android.content.Intent
 import android.net.Uri
 import androidx.compose.runtime.mutableStateOf
@@ -37,6 +39,9 @@ class MainActivity : ComponentActivity() {
         trustStore = FerryTrustStore(applicationContext)
         controlClient = FerryControlClient(identity, trustStore, applicationContext)
         discoveryEngine = FerryDiscoveryEngine(applicationContext)
+        
+        // Phase 5: Inject notification dispatcher
+        FerryNotificationListenerService.dispatcher = NotificationDispatcher(controlClient)
 
         Log.i(
             TAG,

@@ -1,7 +1,10 @@
 package dev.ferry.app.ui
 
+import android.content.ComponentName
 import android.content.Context
+import android.content.Intent
 import android.net.Uri
+import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -21,6 +24,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -31,6 +37,8 @@ import dev.ferry.app.discovery.FerryDiscoveryEngine
 import dev.ferry.app.net.FerryControlClient
 import dev.ferry.app.protocol.ProtocolConstants
 import dev.ferry.app.security.FerrySession
+import dev.ferry.app.notification.FerryNotificationListenerService
+import dev.ferry.app.notification.NotificationSettingsStore
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -44,6 +52,25 @@ fun FerryApp(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val lifecycleOwner = LocalLifecycleOwner.current
+
+    // Phase 5: Notification mirroring state
+    var notifMirroringEnabled by remember { mutableStateOf(NotificationSettingsStore.isEnabled(context)) }
+    val listenerActive by FerryNotificationListenerService.listenerActive.collectAsState()
+    
+    // Check permission state when resuming
+    var hasNotifPermission by remember { 
+        mutableStateOf(isNotificationServiceEnabled(context))
+    }
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                hasNotifPermission = isNotificationServiceEnabled(context)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     val discoveredDevices by discoveryEngine?.discoveredDevices?.collectAsState()
         ?: remember { mutableStateOf(emptyList()) }
@@ -63,23 +90,16 @@ fun FerryApp(
     val incomingProgress by controlClient?.incomingTransferProgress?.collectAsState()
         ?: remember { mutableStateOf(null) }
 
+    val pendingIncomingRequest by controlClient?.pendingIncomingRequest?.collectAsState()
+        ?: remember { mutableStateOf(null) }
+
     val transferHistory by controlClient?.transferHistory?.collectAsState()
         ?: remember { mutableStateOf(emptyList()) }
 
     val interruptedTransfers by controlClient?.interruptedTransfers?.collectAsState()
         ?: remember { mutableStateOf(emptyList()) }
 
-    val remoteClipboard by controlClient?.remoteClipboard?.collectAsState()
-        ?: remember { mutableStateOf(null) }
 
-    // Clipboard sync: write remote clipboard to Android when it changes
-    LaunchedEffect(remoteClipboard) {
-        val text = remoteClipboard ?: return@LaunchedEffect
-        val cm = context.getSystemService(android.content.ClipboardManager::class.java)
-        cm?.setPrimaryClip(android.content.ClipData.newPlainText("Ferry Clipboard Sync", text))
-    }
-
-    val clipboardSyncEnabled = remember { mutableStateOf(false) }
     val isEstablished = sessionState == FerrySession.State.ESTABLISHED
 
     val multipleFilePicker = rememberLauncherForActivityResult(
@@ -228,11 +248,7 @@ fun FerryApp(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(12.dp)
                         ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(48.dp)
-                                    .background(MaterialTheme.colorScheme.surfaceContainerHighest, RoundedCornerShape(4.dp))
-                            )
+
                             Column {
                                 Text(
                                     text = connectedDevice?.deviceName ?: "Unknown Device",
@@ -390,7 +406,75 @@ fun FerryApp(
                 }
             }
 
-            // Clipboard Sync / Settings removed from main UI
+            // ── Settings ───────────────────────────────────────────────────
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    text = "SETTINGS",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(4.dp),
+                    color = MaterialTheme.colorScheme.surfaceContainer,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+                ) {
+                    Column(
+                        modifier = Modifier.padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(16.dp)
+                    ) {
+                        Row(
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Notification Mirroring",
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Spacer(modifier = Modifier.height(4.dp))
+                                val statusText = when {
+                                    !notifMirroringEnabled -> "Mirror phone notifications to connected PC"
+                                    notifMirroringEnabled && !hasNotifPermission -> "Access was turned off. Needs permission."
+                                    notifMirroringEnabled && hasNotifPermission && !listenerActive -> "Service restarting..."
+                                    notifMirroringEnabled && hasNotifPermission && listenerActive && !isEstablished -> "Active • waiting for PC"
+                                    else -> "Active • mirroring to PC"
+                                }
+                                Text(
+                                    text = statusText,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = if (notifMirroringEnabled && !hasNotifPermission) MaterialTheme.colorScheme.error 
+                                            else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Switch(
+                                checked = notifMirroringEnabled,
+                                onCheckedChange = { enable ->
+                                    if (enable) {
+                                        NotificationSettingsStore.setEnabled(context, true)
+                                        notifMirroringEnabled = true
+                                        if (!isNotificationServiceEnabled(context)) {
+                                            // Request permission
+                                            context.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+                                        }
+                                    } else {
+                                        NotificationSettingsStore.setEnabled(context, false)
+                                        notifMirroringEnabled = false
+                                        // We don't disable the system permission, just our internal processing
+                                    }
+                                },
+                                colors = SwitchDefaults.colors(
+                                    checkedThumbColor = MaterialTheme.colorScheme.onPrimary,
+                                    checkedTrackColor = MaterialTheme.colorScheme.primary
+                                )
+                            )
+                        }
+                    }
+                }
+            }
         }
 
         // ── Pairing Dialog ─────────────────────────────────────────────────
@@ -398,13 +482,21 @@ fun FerryApp(
             sessionState == FerrySession.State.WAITING_FOR_LOCAL_DECISION
         ) {
             AlertDialog(
-                onDismissRequest = { controlClient?.rejectPairing() },
+                onDismissRequest = { 
+                    if (sessionState == FerrySession.State.WAITING_FOR_LOCAL_DECISION) {
+                        controlClient?.rejectPairing() 
+                    }
+                },
                 containerColor = MaterialTheme.colorScheme.surfaceContainer,
                 shape = RoundedCornerShape(0.dp),
                 title = { Text("PAIR NEW DEVICE", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary) },
                 text = {
                     Column {
-                        Text("Verify this code matches the other device:", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        if (sessionState == FerrySession.State.PAIRING) {
+                            Text("Confirm this code matches on the PC:", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        } else {
+                            Text("Verify this code matches the other device:", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
                         Spacer(modifier = Modifier.height(16.dp))
                         Text(
                             text = sasCode ?: "…",
@@ -415,8 +507,63 @@ fun FerryApp(
                     }
                 },
                 confirmButton = {
+                    if (sessionState == FerrySession.State.WAITING_FOR_LOCAL_DECISION) {
+                        Button(
+                            onClick = { controlClient?.acceptPairing() },
+                            shape = RoundedCornerShape(0.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = MaterialTheme.colorScheme.primary,
+                                contentColor = MaterialTheme.colorScheme.onPrimary
+                            )
+                        ) { Text("ACCEPT", style = MaterialTheme.typography.labelLarge) }
+                    }
+                },
+                dismissButton = {
+                    if (sessionState == FerrySession.State.WAITING_FOR_LOCAL_DECISION) {
+                        Button(
+                            onClick = { controlClient?.rejectPairing() },
+                            shape = RoundedCornerShape(0.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = Color.Transparent,
+                                contentColor = MaterialTheme.colorScheme.error
+                            ),
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.error)
+                        ) { Text("REJECT", style = MaterialTheme.typography.labelLarge) }
+                    } else {
+                        // Display an inactive cancel button for PAIRING state so the user isn't stuck if PC fails
+                        TextButton(
+                            onClick = { controlClient?.disconnect() }
+                        ) { Text("CANCEL", color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                    }
+                }
+            )
+        }
+        
+        // ── Incoming Transfer Dialog ───────────────────────────────────────
+        if (pendingIncomingRequest != null) {
+            val req = pendingIncomingRequest!!
+            val sizeMb = req.fileSize / (1024f * 1024f)
+            AlertDialog(
+                onDismissRequest = { controlClient?.rejectIncomingTransfer() },
+                containerColor = MaterialTheme.colorScheme.surfaceContainer,
+                shape = RoundedCornerShape(0.dp),
+                title = { Text("INCOMING TRANSFER", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary) },
+                text = {
+                    Column {
+                        Text(connectedDevice?.deviceName ?: "Unknown Device", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Spacer(modifier = Modifier.height(16.dp))
+                        val filesDesc = if (req.chunkCount > 0) "1 file" else "1 file" // Just one for now in Phase 3
+                        Text(
+                            text = String.format("%s\n%.1f MB", filesDesc, sizeMb),
+                            style = MaterialTheme.typography.titleMedium,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.align(Alignment.CenterHorizontally)
+                        )
+                    }
+                },
+                confirmButton = {
                     Button(
-                        onClick = { controlClient?.acceptPairing() },
+                        onClick = { controlClient?.acceptIncomingTransfer() },
                         shape = RoundedCornerShape(0.dp),
                         colors = ButtonDefaults.buttonColors(
                             containerColor = MaterialTheme.colorScheme.primary,
@@ -426,7 +573,7 @@ fun FerryApp(
                 },
                 dismissButton = {
                     Button(
-                        onClick = { controlClient?.rejectPairing() },
+                        onClick = { controlClient?.rejectIncomingTransfer() },
                         shape = RoundedCornerShape(0.dp),
                         colors = ButtonDefaults.buttonColors(
                             containerColor = Color.Transparent,
@@ -651,11 +798,7 @@ private fun DiscoveredDeviceCard(
                 horizontalArrangement = Arrangement.spacedBy(16.dp),
                 modifier = Modifier.weight(1f)
             ) {
-                Box(
-                    modifier = Modifier
-                        .size(36.dp)
-                        .background(MaterialTheme.colorScheme.surfaceContainerHighest, RoundedCornerShape(4.dp))
-                )
+
                 Column {
                     Text(
                         text = device.deviceName,
@@ -729,4 +872,19 @@ private fun collectUrisRecursively(
             child.isFile -> out.add(child.uri)
         }
     }
+}
+
+fun isNotificationServiceEnabled(context: Context): Boolean {
+    val pkgName = context.packageName
+    val flat = Settings.Secure.getString(context.contentResolver, "enabled_notification_listeners")
+    if (flat != null && flat.isNotEmpty()) {
+        val names = flat.split(":")
+        for (name in names) {
+            val componentName = ComponentName.unflattenFromString(name)
+            if (componentName != null && componentName.packageName == pkgName) {
+                return true
+            }
+        }
+    }
+    return false
 }

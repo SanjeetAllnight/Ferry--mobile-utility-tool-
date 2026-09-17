@@ -129,6 +129,9 @@ class FerrySession:
         self._send_counter: int = 0
         self._recv_counter: int = 0
 
+        # Phase 5: capabilities advertised by the remote peer (e.g. ["notify.v1"])
+        self.peer_capabilities: list = []
+
     @property
     def state(self) -> SessionState:
         return self._state

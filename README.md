@@ -34,10 +34,9 @@ The initial Minimum Viable Product (MVP) focuses on **reliable bidirectional fil
 6. **Real-time Transfer Progress & Status**
 7. **Transfer Cancellation & Graceful Failure Handling**
 8. **Transfer Integrity Verification** (End-to-end SHA-256 validation)
-9. **Transfer History**
-10. **Native Linux (Libadwaita) and Android (Compose) UIs**
+9. **Notifications**: Mirroring of important Android notifications to Linux (Next Milestone).
 
-*Out of scope for initial MVP (Future milestones)*: SMS, calls, notification sync, clipboard sync, media controls, screen mirroring, remote camera/mic, and filesystem browsing.
+*Explicitly Deferred (Out of Scope)*: Clipboard sync, QR/manual pairing, remote filesystem browsing, media controls, screen mirroring, remote desktop, cloud sync, general device control, SMS functionality, calling functionality, camera streaming, remote command execution.
 
 ---
 

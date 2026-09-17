@@ -64,6 +64,13 @@ class MessageType(str, Enum):
     CLIPBOARD_SYNC = "CLIPBOARD_SYNC"        # either direction: push text clipboard to peer
     CLIPBOARD_SYNC_ACK = "CLIPBOARD_SYNC_ACK"  # optional acknowledgement
 
+    # Capability negotiation
+    CAPABILITIES = "CAPABILITIES"            # either direction: advertise supported capabilities
+
+    # Notification Mirroring (Phase 5)
+    NOTIFICATION_POST   = "NOTIFICATION_POST"    # Android → Linux: post/upsert notification
+    NOTIFICATION_REMOVE = "NOTIFICATION_REMOVE"  # Android → Linux: remove notification
+
 
 @dataclass
 class TransferRequestPayload:
@@ -497,3 +504,102 @@ def decode_frame(buffer: bytes) -> Tuple[Optional[FerryEnvelope], int]:
     json_str = payload_bytes.decode("utf-8")
     envelope = FerryEnvelope.from_json(json_str)
     return envelope, total_frame_size
+
+
+# ── Notification Mirroring Payloads (Phase 5) ──────────────────────────────
+
+# Maximum payload size for a notification frame (8 KiB — much smaller than the
+# 1 MiB control frame limit, enforced before passing to D-Bus).
+MAX_NOTIFICATION_FRAME_BYTES = 8 * 1024
+
+# Per-field length limits (post-truncation values)
+NOTIF_MAX_TITLE   = 200
+NOTIF_MAX_BODY    = 1000
+NOTIF_MAX_PKG     = 255
+NOTIF_MAX_LABEL   = 100
+
+
+@dataclass
+class NotificationPostPayload:
+    """
+    Phase 5 NOTIFICATION_POST payload — carries a mirrored Android notification.
+
+    ferry_id is a stable, per-installation HMAC-derived ID — never the raw
+    Android notification key. title/body are user-visible strings and must
+    NOT be logged by any layer.
+    """
+    ferry_id:   str   # 16-byte HMAC prefix, base64url
+    package:    str   # Android package name (≤ 255 chars after truncation)
+    app_label:  str   # Human-readable app name (≤ 100 chars)
+    title:      str   # Notification title (≤ 200 chars) — SENSITIVE
+    body:       str   # Notification body  (≤ 1000 chars) — SENSITIVE
+    posted_at:  int   # Unix epoch milliseconds
+    category:   str   # Notification.CATEGORY_* value or ""
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "NotificationPostPayload":
+        """Parse and validate a notification payload dict received from a peer.
+
+        Raises ValueError on schema violations. Never logs title or body.
+        """
+        for required in ("ferry_id", "package", "app_label", "title", "body", "posted_at"):
+            if required not in d:
+                raise ValueError(f"Missing required notification field: {required}")
+
+        ferry_id  = str(d["ferry_id"])[:64]   # cap; never used as filesystem path
+        package   = str(d["package"])[:NOTIF_MAX_PKG]
+        app_label = str(d["app_label"])[:NOTIF_MAX_LABEL]
+        title     = str(d["title"])[:NOTIF_MAX_TITLE]
+        body      = str(d["body"])[:NOTIF_MAX_BODY]
+        posted_at = int(d["posted_at"])
+        category  = str(d.get("category", ""))[:64]
+
+        if not ferry_id:
+            raise ValueError("ferry_id must not be empty")
+        if not package:
+            raise ValueError("package must not be empty")
+
+        return cls(
+            ferry_id=ferry_id,
+            package=package,
+            app_label=app_label,
+            title=title,
+            body=body,
+            posted_at=posted_at,
+            category=category,
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "ferry_id":  self.ferry_id,
+            "package":   self.package,
+            "app_label": self.app_label,
+            "title":     self.title,
+            "body":      self.body,
+            "posted_at": self.posted_at,
+            "category":  self.category,
+        }
+
+    def __repr__(self) -> str:
+        # Deliberately omit title and body to prevent accidental log exposure.
+        return (
+            f"NotificationPostPayload(ferry_id={self.ferry_id!r}, "
+            f"package={self.package!r}, app_label={self.app_label!r}, "
+            f"posted_at={self.posted_at})"
+        )
+
+
+@dataclass
+class NotificationRemovePayload:
+    """Phase 5 NOTIFICATION_REMOVE payload."""
+    ferry_id: str
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "NotificationRemovePayload":
+        ferry_id = str(d.get("ferry_id", ""))
+        if not ferry_id:
+            raise ValueError("ferry_id must not be empty")
+        return cls(ferry_id=ferry_id[:64])
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"ferry_id": self.ferry_id}
