@@ -88,6 +88,16 @@ class FerryDiscoveryEngine(private val context: Context) {
         Log.i(TAG, "Ferry discovery engine stopped.")
     }
 
+    @Synchronized
+    fun restartDiscovery() {
+        Log.i(TAG, "Restarting Ferry discovery scan.")
+        stopDiscovery()
+        deviceMap.clear()
+        serviceNameToDeviceId.clear()
+        _discoveredDevices.value = emptyList()
+        discoverServices()
+    }
+
     private fun acquireMulticastLock() {
         try {
             if (multicastLock == null) {
@@ -192,9 +202,25 @@ class FerryDiscoveryEngine(private val context: Context) {
 
             override fun onServiceLost(serviceInfo: NsdServiceInfo) {
                 Log.i(TAG, "Service lost: ${serviceInfo.serviceName}")
-                val devId = serviceNameToDeviceId.remove(serviceInfo.serviceName)
-                if (devId != null) {
-                    deviceMap.remove(devId)
+                var changed = false
+                
+                // NsdManager sometimes escapes characters in onServiceLost (e.g. \032 instead of space)
+                val searchName = serviceInfo.serviceName.replace("\\032", " ")
+                
+                val matchingKeys = serviceNameToDeviceId.keys.filter { 
+                    it.replace("\\032", " ") == searchName ||
+                    it.contains(searchName) || searchName.contains(it)
+                }
+                
+                matchingKeys.forEach { key ->
+                    val devId = serviceNameToDeviceId.remove(key)
+                    if (devId != null) {
+                        deviceMap.remove(devId)
+                        changed = true
+                    }
+                }
+                
+                if (changed) {
                     updateDevicesFlow()
                 }
             }

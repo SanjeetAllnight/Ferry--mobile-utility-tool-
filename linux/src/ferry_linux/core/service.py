@@ -984,10 +984,17 @@ class FerryService:
                 "public_key": self.identity.public_key_b64,
                 "ephemeral_key": base64.urlsafe_b64encode(local_hs.ephemeral_pub_key).rstrip(b"=").decode(),
                 "nonce": base64.urlsafe_b64encode(local_hs.nonce).rstrip(b"=").decode(),
-                "is_paired": False,  # updated below
+                "is_paired": False,
             }
 
             if is_initiator:
+                # If we are initiating a connection to a known peer, we might already know their public key
+                # Wait, ps.remote_static_pub_b64 is set when connecting from UI for known peers? Let's assume False for now unless we know it.
+                if ps.remote_static_pub_b64:
+                    existing = self.db.get_device_by_public_key(ps.remote_static_pub_b64)
+                    if existing:
+                        init_payload["is_paired"] = True
+
                 await self._send_plain(writer, MessageType.HANDSHAKE_INIT, init_payload)
                 remote_env = await asyncio.wait_for(
                     self._recv_plain(reader), timeout=HANDSHAKE_TIMEOUT_SECS
@@ -1002,6 +1009,13 @@ class FerryService:
                 if remote_env is None or remote_env.type != MessageType.HANDSHAKE_INIT:
                     raise ValueError(f"Expected HANDSHAKE_INIT, got {remote_env and remote_env.type}")
                 remote_payload = remote_env.payload
+                
+                # Check if we know this peer before sending response
+                remote_static_b64 = remote_payload.get("public_key", "")
+                existing = self.db.get_device_by_public_key(remote_static_b64)
+                if existing:
+                    init_payload["is_paired"] = True
+                
                 await self._send_plain(writer, MessageType.HANDSHAKE_RESPONSE, init_payload)
 
             # Parse remote handshake
@@ -1073,9 +1087,12 @@ class FerryService:
             now = int(time.time() * 1000)
 
             if is_paired:
+                # Update DB with potentially new device_id or device_name from peer
+                new_device_id = ps.remote_device_id or existing.device_id
+                new_device_name = ps.remote_device_name or existing.device_name
                 self.db.add_or_update_device(TrustedDevice(
-                    device_id=existing.device_id,
-                    device_name=existing.device_name,
+                    device_id=new_device_id,
+                    device_name=new_device_name,
                     public_key=existing.public_key,
                     identity_public_key_b64=existing.identity_public_key_b64,
                     paired_at=existing.paired_at,
@@ -1182,6 +1199,10 @@ class FerryService:
                             ps.session.transition(SessionState.PAIR_ACCEPTED)
                             self._persist_trust(ps)
                             ps.session.transition(SessionState.ESTABLISHED)
+                            try:
+                                await self.send_encrypted(ps, MessageType.CAPABILITIES, {"capabilities": ["notify.v1"]})
+                            except Exception as exc:
+                                logger.debug("Failed to send CAPABILITIES after pairing: %s", exc)
                         self._notify_session_change(ps.remote_addr, ps.session.state)
                     continue
 
@@ -1546,21 +1567,104 @@ class FerryService:
         await self.send_encrypted(ps, MessageType.BATCH_REJECT, {"batch_id": batch_id, "reason": "USER_REJECTED"})
 
     async def _on_transfer_resume_request(self, ps: "PeerSession", payload: dict) -> None:
-        """Receiver side: handle an incoming TRANSFER_RESUME_REQUEST."""
+        """Sender side: handle an incoming TRANSFER_RESUME_REQUEST from the receiver.
+
+        If Linux was the original receiver (incoming transfer interrupted), we have a
+        persisted record in the database and can accept the resume after verification.
+        If Linux was the original sender (outgoing transfer interrupted), we have no
+        record and must reject.
+        """
         transfer_id = payload.get("transfer_id")
         if not transfer_id:
             return
-            
-        # Linux does not persist outgoing transfers, and send_file pops them on disconnect.
-        # Thus, if we receive a resume request, we cannot fulfill it and must reject it.
+
+        # Check if we have an interrupted incoming transfer record for this transfer_id
+        info = self.db.get_interrupted_transfer(transfer_id)
+        if not info:
+            # No interrupted record — Linux was the sender, cannot resume
+            try:
+                await self.send_encrypted(
+                    ps, MessageType.TRANSFER_RESUME_REJECT,
+                    {"transfer_id": transfer_id, "reason": "TRANSFER_NOT_FOUND"}
+                )
+                logger.info("Rejected resume for %s (no interrupted record — Linux was sender)", transfer_id[:8])
+            except Exception as exc:
+                logger.warning("Failed to send TRANSFER_RESUME_REJECT: %s", exc)
+            return
+
+        # Verify the peer identity matches the original sender
+        if ps.remote_static_pub_b64 != info.sender_identity:
+            try:
+                await self.send_encrypted(
+                    ps, MessageType.TRANSFER_RESUME_REJECT,
+                    {"transfer_id": transfer_id, "reason": "WRONG_PEER"}
+                )
+                logger.warning("Rejected resume for %s (peer identity mismatch)", transfer_id[:8])
+            except Exception as exc:
+                logger.warning("Failed to send TRANSFER_RESUME_REJECT: %s", exc)
+            return
+
+        # Verify the partial SHA-256 matches what we have on disk
+        request_partial_sha256 = payload.get("partial_sha256", "").lower()
+        if request_partial_sha256 != info.partial_sha256.lower():
+            try:
+                await self.send_encrypted(
+                    ps, MessageType.TRANSFER_RESUME_REJECT,
+                    {"transfer_id": transfer_id, "reason": "PARTIAL_CORRUPT"}
+                )
+                logger.warning("Rejected resume for %s (partial SHA-256 mismatch)", transfer_id[:8])
+            except Exception as exc:
+                logger.warning("Failed to send TRANSFER_RESUME_REJECT: %s", exc)
+            return
+
+        # Verify the resume_chunk_index matches
+        request_chunk_index = payload.get("resume_chunk_index", 0)
+        if request_chunk_index != info.resume_chunk_index:
+            try:
+                await self.send_encrypted(
+                    ps, MessageType.TRANSFER_RESUME_REJECT,
+                    {"transfer_id": transfer_id, "reason": "PARTIAL_CORRUPT"}
+                )
+                logger.warning("Rejected resume for %s (chunk index mismatch)", transfer_id[:8])
+            except Exception as exc:
+                logger.warning("Failed to send TRANSFER_RESUME_REJECT: %s", exc)
+            return
+
+        # All checks passed — accept the resume
         try:
+            # Re-create the IncomingTransfer object from persisted metadata
+            import json as _json
+            meta = TransferMetadata.from_dict(_json.loads(info.original_metadata_json))
+            staging_dir = Path(self.config.download_dir) / "staging"
+            incoming = IncomingTransfer(meta=meta, download_dir=Path(self.config.download_dir))
+            incoming._temp_path = staging_dir / f"{meta.transfer_id}.part"
+            incoming._state = TransferState.INTERRUPTED
+
+            # Transition to RESUME_REQUESTED then RESUMING
+            incoming.resume(info.resume_chunk_index)
+
+            # Track the incoming transfer for chunk processing
+            self._incoming_transfers[transfer_id] = incoming
+            self._incoming_peers[transfer_id] = ps
+
             await self.send_encrypted(
-                ps, MessageType.TRANSFER_RESUME_REJECT,
-                {"transfer_id": transfer_id, "reason": "TRANSFER_NOT_FOUND"}
+                ps, MessageType.TRANSFER_RESUME_ACCEPT,
+                {
+                    "transfer_id": transfer_id,
+                    "resume_chunk_index": info.resume_chunk_index,
+                    "protocol_version": 1,
+                }
             )
-            logger.info("Rejected resume for %s (not found/supported)", transfer_id[:8])
+            logger.info("Accepted resume for %s at chunk %d", transfer_id[:8], info.resume_chunk_index)
         except Exception as exc:
-            logger.warning("Failed to send TRANSFER_RESUME_REJECT: %s", exc)
+            logger.error("Failed to accept resume for %s: %s", transfer_id[:8], exc)
+            try:
+                await self.send_encrypted(
+                    ps, MessageType.TRANSFER_RESUME_REJECT,
+                    {"transfer_id": transfer_id, "reason": "SOURCE_MODIFIED"}
+                )
+            except Exception:
+                pass
 
     async def _on_transfer_request(self, ps: "PeerSession", payload: dict) -> None:
         """Receiver side: handle an incoming TRANSFER_REQUEST."""

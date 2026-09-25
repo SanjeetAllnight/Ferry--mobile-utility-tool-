@@ -192,7 +192,10 @@ class FerryMainWindow(Adw.ApplicationWindow):
             self.trusted_group.remove(row)
         self._trusted_rows.clear()
 
-        established = getattr(self, "_ipc_sessions", {})
+        established = {
+            addr: ps for addr, ps in getattr(self, "_ipc_sessions", {}).items()
+            if ps.get("state") == "ESTABLISHED"
+        }
         
         self._send_btn.set_sensitive(bool(established))
         self._check_pending_send()
@@ -227,7 +230,9 @@ class FerryMainWindow(Adw.ApplicationWindow):
             row.set_icon_name("phone-symbolic")
 
             is_connected = any(
-                ps.get("remote_device_id") == dev_id or addr == dev_id
+                ps.get("remote_device_id") == dev_id or 
+                addr == dev_id or
+                (pubkey and ps.get("remote_static_pub_b64") == pubkey)
                 for addr, ps in established.items()
             )
             if is_connected:
@@ -246,7 +251,9 @@ class FerryMainWindow(Adw.ApplicationWindow):
                 
                 remote_addr = next(
                     (addr for addr, ps in established.items()
-                     if ps.get("remote_device_id") == dev_id or addr == dev_id),
+                     if ps.get("remote_device_id") == dev_id or 
+                        addr == dev_id or
+                        (pubkey and ps.get("remote_static_pub_b64") == pubkey)),
                     None,
                 )
                 
@@ -281,14 +288,6 @@ class FerryMainWindow(Adw.ApplicationWindow):
         if not app:
             return False
         app.get_trusted_devices()
-        return False
-        
-        try:
-            devices = app.service.db.list_devices()
-        except AttributeError:
-            devices = app.service.db.get_trusted_devices()
-            
-        self.update_trusted_devices_from_db(devices)
         return False
 
     def _on_unpair_clicked_pk(self, pubkey: str) -> None:

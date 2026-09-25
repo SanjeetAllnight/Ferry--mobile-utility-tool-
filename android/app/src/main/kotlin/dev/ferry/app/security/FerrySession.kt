@@ -278,7 +278,7 @@ class FerrySession(private val isInitiator: Boolean) {
             State.CONNECTING to setOf(State.HANDSHAKING, State.FAILED),
             State.HANDSHAKING to setOf(State.AUTHENTICATING, State.FAILED),
             State.AUTHENTICATING to setOf(State.ESTABLISHED, State.PAIRING, State.FAILED),
-            State.PAIRING to setOf(State.WAITING_FOR_LOCAL_DECISION, State.WAITING_FOR_REMOTE_DECISION, State.FAILED),
+            State.PAIRING to setOf(State.WAITING_FOR_LOCAL_DECISION, State.WAITING_FOR_REMOTE_DECISION, State.PAIR_ACCEPTED, State.FAILED),
             State.WAITING_FOR_LOCAL_DECISION to setOf(State.WAITING_FOR_REMOTE_DECISION, State.PAIR_ACCEPTED, State.FAILED),
             State.WAITING_FOR_REMOTE_DECISION to setOf(State.WAITING_FOR_LOCAL_DECISION, State.PAIR_ACCEPTED, State.FAILED),
             State.PAIR_ACCEPTED to setOf(State.ESTABLISHED, State.FAILED),

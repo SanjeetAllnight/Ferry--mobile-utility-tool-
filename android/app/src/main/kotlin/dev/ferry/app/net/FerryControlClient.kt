@@ -334,9 +334,15 @@ class FerryControlClient(
             // Step 1: Send HANDSHAKE_INIT
             val isKnownLocally = trustStore.listPeers().any { it.deviceId == device.deviceId }
             val (_, ephPub, nonce) = sess.buildLocalHandshake(identity.publicKeyBytes)
+            val prefs = context.getSharedPreferences("ferry_prefs", Context.MODE_PRIVATE)
+            val localDeviceId = prefs.getString("device_id", null) ?: java.util.UUID.randomUUID().toString().also {
+                prefs.edit().putString("device_id", it).apply()
+            }
+            val localDeviceName = android.os.Build.MODEL?.let { "$it (Ferry)" } ?: "Android Device (Ferry)"
+
             val initPayload = JSONObject().apply {
-                put("device_id", device.deviceId)
-                put("device_name", device.deviceName)
+                put("device_id", localDeviceId)
+                put("device_name", localDeviceName)
                 put("device_type", "mobile")
                 put("public_key", identity.publicKeyB64)
                 put("ephemeral_key", bytesToB64(ephPub))
@@ -469,18 +475,6 @@ class FerryControlClient(
             persistPendingTrust()
             sess.transition(FerrySession.State.ESTABLISHED)
             _sessionState.value = FerrySession.State.ESTABLISHED
-            
-            // Phase 5: advertise our capabilities to the peer
-            try {
-                val capsPayload = JSONObject().apply {
-                    val arr = org.json.JSONArray()
-                    arr.put("notify.v1")
-                    put("capabilities", arr)
-                }
-                sendEncrypted(sess, ProtocolConstants.MessageTypes.CAPABILITIES, capsPayload)
-            } catch (e: Exception) {
-                Log.d(TAG, "Failed to send CAPABILITIES: ${e.message}")
-            }
         }
 
         scope.launch {
@@ -489,6 +483,20 @@ class FerryControlClient(
                     JSONObject().apply { put("decision", "ACCEPT") })
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to send pairing acceptance", e)
+            }
+            
+            if (sess.state == FerrySession.State.ESTABLISHED) {
+                // Phase 5: advertise our capabilities to the peer
+                try {
+                    val capsPayload = JSONObject().apply {
+                        val arr = org.json.JSONArray()
+                        arr.put("notify.v1")
+                        put("capabilities", arr)
+                    }
+                    sendEncrypted(sess, ProtocolConstants.MessageTypes.CAPABILITIES, capsPayload)
+                } catch (e: Exception) {
+                    Log.d(TAG, "Failed to send CAPABILITIES: ${e.message}")
+                }
             }
         }
     }
@@ -571,8 +579,31 @@ class FerryControlClient(
                         break
                     } else if (decision == "ACCEPT") {
                         if (sess.state == FerrySession.State.PAIRING) {
-                            sess.transition(FerrySession.State.WAITING_FOR_LOCAL_DECISION)
-                            _sessionState.value = FerrySession.State.WAITING_FOR_LOCAL_DECISION
+                            // Linux authorized the pairing. Android doesn't need local authorization.
+                            sess.transition(FerrySession.State.PAIR_ACCEPTED)
+                            persistPendingTrust()
+                            sess.transition(FerrySession.State.ESTABLISHED)
+                            _sessionState.value = FerrySession.State.ESTABLISHED
+                            
+                            try {
+                                val payload = JSONObject().apply { put("decision", "ACCEPT") }
+                                sendEncrypted(sess, ProtocolConstants.MessageTypes.PAIR_DECISION, payload)
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Failed to echo pairing acceptance", e)
+                            }
+                            
+                            // Phase 5: advertise our capabilities to the peer
+                            try {
+                                val capsPayload = JSONObject().apply {
+                                    val arr = org.json.JSONArray()
+                                    arr.put("notify.v1")
+                                    put("capabilities", arr)
+                                }
+                                sendEncrypted(sess, ProtocolConstants.MessageTypes.CAPABILITIES, capsPayload)
+                            } catch (e: Exception) {
+                                Log.d(TAG, "Failed to send CAPABILITIES: ${e.message}")
+                            }
+
                         } else if (sess.state == FerrySession.State.WAITING_FOR_REMOTE_DECISION) {
                             sess.transition(FerrySession.State.PAIR_ACCEPTED)
                             persistPendingTrust()

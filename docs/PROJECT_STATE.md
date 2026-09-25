@@ -10,6 +10,7 @@ This document is the primary persistent context file for **Ferry**. It reflects 
 
 ### Phase 4 Progress Tracking:
 - **Phase 4A / 4B / 4C (Multi-File, Share Integration, Batch Transfers)**: Complete. Native Android Share sheet, Linux GTK batch folder send, Android `sendBatch()`. **Critical bug fixed:** Android `onBatchRequest()` was rejecting all incoming batches — now auto-accepts and tracks active batch ID so sequential TRANSFER_REQUESTs within a batch are accepted.
+- **Phase 4D (Live State & UI Fixes)**: Complete. Fixed Android `NsdManager` stale cache presentation and Linux GTK `ESTABLISHED` state race condition (see `docs/LIVE_DISCOVERY_SESSION_FIX_REPORT.md`).
 - **MVP Final Sprint**: Complete. Desktop notifications (GLib.Notification), systemd user service, `.desktop` entry, install script. See `docs/FINAL_MVP_IMPLEMENTATION_REPORT.md`.
 - **MVP Completion Sprint**: Complete. See Section 3 below for full feature list.
 
@@ -214,3 +215,8 @@ adb shell am start -n dev.ferry.app/.MainActivity
 - Protocol expanded with `CAPABILITIES` and `NOTIFICATION_POST/REMOVE`.
 - UI pairing fixed to remove 'Reject' when only in 'PAIRING' state.
 - **Next Step:** User must perform physical device validation of notifications and pairing.
+
+## Phase 5a: Pairing State Machine Bug Fix (Pending Physical QA)
+- Android pairing flow incorrectly prompted for local authorization upon receiving Linux's `PAIR_DECISION("ACCEPT")`.
+- `FerryControlClient.kt` was fixed to transition directly to `ESTABLISHED` and echo `ACCEPT` without entering `WAITING_FOR_LOCAL_DECISION`.
+- Linux `service.py` was updated to advertise capabilities (`notify.v1`) on fresh pairing, not just reconnects.

@@ -149,3 +149,11 @@ Every AI agent or developer must verify the following before concluding tasks:
 3. `cd android && ./gradlew testDebugUnitTest` exits with code `0`.
 4. `cd android && ./gradlew assembleDebug` successfully produces a valid APK.
 5. If physical device is connected, verify live ADB installation and logcat output.
+
+### 5. Pairing State Machine Test (Manual)
+1. **Clear App Data:** Ensure Android and Linux have cleared previous pairing data.
+2. **Initiate Pairing:** Android scans and connects to Linux.
+3. **Android UI:** Verify Android ONLY shows SAS + Cancel.
+4. **Linux UI:** Verify Linux shows SAS + Accept/Reject.
+5. **Accept:** Click Accept on Linux.
+6. **Verify Result:** Android transitions directly to connected state WITHOUT showing another Accept/Reject dialog. Trust is persisted and file transfers can occur.

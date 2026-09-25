@@ -38,6 +38,7 @@ import struct
 import tempfile
 import time
 import unittest
+import unittest.mock
 import uuid
 from pathlib import Path
 
@@ -2060,7 +2061,7 @@ class TestPhase3ETask3ResumeExecution(unittest.TestCase):
         with unittest.mock.patch('ferry_linux.core.transfer.IncomingTransfer.resume') as mock_resume:
             # Call request_resume
             result = asyncio.run(service.request_resume(mock_ps.remote_addr, transfer_id))
-    
+            
             self.assertTrue(result)
             mock_resume.assert_called_once_with(1)
             
@@ -2071,6 +2072,200 @@ class TestPhase3ETask3ResumeExecution(unittest.TestCase):
             self.assertEqual(args[2]["transfer_id"], transfer_id)
             self.assertEqual(args[2]["resume_chunk_index"], 1)
 
+    def test_t318_linux_receiver_accepts_resume_request(self) -> None:
+        """_on_transfer_resume_request on Linux receiver (has interrupted record) should return TRANSFER_RESUME_ACCEPT."""
+        from ferry_linux.core.service import FerryService
+        from ferry_linux.core.db import InterruptedTransferInfo
+        from ferry_linux.protocol.models import MessageType
+        import time
+        import json
+
+        service = FerryService(self.tmpdir)
+        service.send_encrypted = unittest.mock.AsyncMock()
+
+        mock_ps = unittest.mock.MagicMock()
+        mock_ps.remote_addr = "127.0.0.1:53770"
+        mock_ps.remote_static_pub_b64 = "dGVzdA=="  # matches sender_identity in DB
+
+        transfer_id = str(uuid.uuid4())
+
+        # Create DB record for interrupted incoming transfer
+        now_ms = int(time.time() * 1000)
+        metadata_dict = {
+            "transfer_id": transfer_id,
+            "file_name": "test.txt",
+            "file_size": 100000,
+            "chunk_size": 65536,
+            "chunk_count": 2,
+            "sha256": "a" * 64,
+            "sender_identity": "dGVzdA==",
+            "created_at": now_ms,
+            "protocol_version": 1,
+        }
+
+        info = InterruptedTransferInfo(
+            transfer_id=transfer_id,
+            bytes_received=65536,
+            resume_chunk_index=1,
+            partial_sha256="0" * 64,
+            sender_identity="dGVzdA==",
+            original_metadata_json=json.dumps(metadata_dict),
+            interrupted_at=now_ms,
+            expire_at=InterruptedTransferInfo.make_expire_at(now_ms),
+        )
+        service.db.save_interrupted_transfer(info)
+
+        # Create .part file with matching content
+        staging_dir = Path(service.config.download_dir) / "staging"
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        part_file = staging_dir / f"{transfer_id}.part"
+        part_file.write_bytes(b"a" * 65536)
+
+        # Send TRANSFER_RESUME_REQUEST
+        payload = {
+            "transfer_id": transfer_id,
+            "resume_offset_bytes": 65536,
+            "resume_chunk_index": 1,
+            "partial_sha256": "0" * 64,
+            "protocol_version": 1,
+        }
+        asyncio.run(service._on_transfer_resume_request(mock_ps, payload))
+
+        # Should accept the resume
+        service.send_encrypted.assert_called_once()
+        args, _ = service.send_encrypted.call_args
+        self.assertEqual(args[1], MessageType.TRANSFER_RESUME_ACCEPT)
+        self.assertEqual(args[2]["transfer_id"], transfer_id)
+        self.assertEqual(args[2]["resume_chunk_index"], 1)
+
+        # Verify incoming transfer is tracked for chunk processing
+        self.assertIn(transfer_id, service._incoming_transfers)
+        self.assertEqual(service._incoming_peers[transfer_id], mock_ps)
+
+    def test_t319_linux_receiver_rejects_resume_wrong_peer(self) -> None:
+        """_on_transfer_resume_request should reject if peer identity doesn't match."""
+        from ferry_linux.core.service import FerryService
+        from ferry_linux.core.db import InterruptedTransferInfo
+        from ferry_linux.protocol.models import MessageType
+        import time
+        import json
+
+        service = FerryService(self.tmpdir)
+        service.send_encrypted = unittest.mock.AsyncMock()
+
+        mock_ps = unittest.mock.MagicMock()
+        mock_ps.remote_addr = "127.0.0.1:53770"
+        mock_ps.remote_static_pub_b64 = "d2Jvbmc="  # different from DB record
+
+        transfer_id = str(uuid.uuid4())
+
+        now_ms = int(time.time() * 1000)
+        metadata_dict = {
+            "transfer_id": transfer_id,
+            "file_name": "test.txt",
+            "file_size": 100000,
+            "chunk_size": 65536,
+            "chunk_count": 2,
+            "sha256": "a" * 64,
+            "sender_identity": "dGVzdA==",  # original sender
+            "created_at": now_ms,
+            "protocol_version": 1,
+        }
+
+        info = InterruptedTransferInfo(
+            transfer_id=transfer_id,
+            bytes_received=65536,
+            resume_chunk_index=1,
+            partial_sha256="0" * 64,
+            sender_identity="dGVzdA==",
+            original_metadata_json=json.dumps(metadata_dict),
+            interrupted_at=now_ms,
+            expire_at=InterruptedTransferInfo.make_expire_at(now_ms),
+        )
+        service.db.save_interrupted_transfer(info)
+
+        staging_dir = Path(service.config.download_dir) / "staging"
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        part_file = staging_dir / f"{transfer_id}.part"
+        part_file.write_bytes(b"a" * 65536)
+
+        payload = {
+            "transfer_id": transfer_id,
+            "resume_offset_bytes": 65536,
+            "resume_chunk_index": 1,
+            "partial_sha256": "0" * 64,
+            "protocol_version": 1,
+        }
+        asyncio.run(service._on_transfer_resume_request(mock_ps, payload))
+
+        # Should reject with WRONG_PEER
+        service.send_encrypted.assert_called_once()
+        args, _ = service.send_encrypted.call_args
+        self.assertEqual(args[1], MessageType.TRANSFER_RESUME_REJECT)
+        self.assertEqual(args[2]["reason"], "WRONG_PEER")
+
+    def test_t320_linux_receiver_rejects_resume_bad_hash(self) -> None:
+        """_on_transfer_resume_request should reject if partial_sha256 doesn't match."""
+        from ferry_linux.core.service import FerryService
+        from ferry_linux.core.db import InterruptedTransferInfo
+        from ferry_linux.protocol.models import MessageType
+        import time
+        import json
+
+        service = FerryService(self.tmpdir)
+        service.send_encrypted = unittest.mock.AsyncMock()
+
+        mock_ps = unittest.mock.MagicMock()
+        mock_ps.remote_addr = "127.0.0.1:53770"
+        mock_ps.remote_static_pub_b64 = "dGVzdA=="
+
+        transfer_id = str(uuid.uuid4())
+
+        now_ms = int(time.time() * 1000)
+        metadata_dict = {
+            "transfer_id": transfer_id,
+            "file_name": "test.txt",
+            "file_size": 100000,
+            "chunk_size": 65536,
+            "chunk_count": 2,
+            "sha256": "a" * 64,
+            "sender_identity": "dGVzdA==",
+            "created_at": now_ms,
+            "protocol_version": 1,
+        }
+
+        info = InterruptedTransferInfo(
+            transfer_id=transfer_id,
+            bytes_received=65536,
+            resume_chunk_index=1,
+            partial_sha256="0" * 64,  # correct hash in DB
+            sender_identity="dGVzdA==",
+            original_metadata_json=json.dumps(metadata_dict),
+            interrupted_at=now_ms,
+            expire_at=InterruptedTransferInfo.make_expire_at(now_ms),
+        )
+        service.db.save_interrupted_transfer(info)
+
+        staging_dir = Path(service.config.download_dir) / "staging"
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        part_file = staging_dir / f"{transfer_id}.part"
+        part_file.write_bytes(b"a" * 65536)
+
+        # Send request with WRONG partial_sha256
+        payload = {
+            "transfer_id": transfer_id,
+            "resume_offset_bytes": 65536,
+            "resume_chunk_index": 1,
+            "partial_sha256": "1" * 64,  # wrong hash
+            "protocol_version": 1,
+        }
+        asyncio.run(service._on_transfer_resume_request(mock_ps, payload))
+
+        # Should reject with PARTIAL_CORRUPT
+        service.send_encrypted.assert_called_once()
+        args, _ = service.send_encrypted.call_args
+        self.assertEqual(args[1], MessageType.TRANSFER_RESUME_REJECT)
+        self.assertEqual(args[2]["reason"], "PARTIAL_CORRUPT")
 
 
 if __name__ == "__main__":
