@@ -44,7 +44,7 @@ class FerryDiscoveryEngine(private val context: Context) {
 
     val deviceName: String by lazy {
         val model = Build.MODEL ?: "Android Device"
-        "$model (Ferry)"
+        "$model (Raven)"
     }
 
     private val _discoveredDevices = MutableStateFlow<List<DiscoveredDevice>>(emptyList())

@@ -28,7 +28,7 @@ logger = logging.getLogger("ferry.notification_bridge")
 _DBUS_SERVICE   = "org.freedesktop.Notifications"
 _DBUS_OBJECT    = "/org/freedesktop/Notifications"
 _DBUS_IFACE     = "org.freedesktop.Notifications"
-_FERRY_APP_NAME = "Ferry"
+_FERRY_APP_NAME = "Raven"
 _NOTIFY_TIMEOUT = 5000
 
 _LRU_MAX        = 200

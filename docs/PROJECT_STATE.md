@@ -1,4 +1,4 @@
-# Ferry Project State & Persistent Context
+# Raven Project State & Persistent Context
 
 This document is the primary persistent context file for **Ferry**. It reflects the factual, verified state of the codebase.
 

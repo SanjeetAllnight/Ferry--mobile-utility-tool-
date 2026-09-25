@@ -29,11 +29,17 @@ install_integration() {
         echo "  ✓ Ferry daemon enabled for autostart"
     fi
 
-    # 2. .desktop entry
+    # 2. .desktop entry and icon
     mkdir -p "$DESKTOP_DIR"
     cp "$SCRIPT_DIR/desktop/dev.ferry.Ferry.desktop" "$DESKTOP_DIR/dev.ferry.Ferry.desktop"
+    
+    ICON_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/256x256/apps"
+    mkdir -p "$ICON_DIR"
+    cp "$SCRIPT_DIR/desktop/dev.ferry.Ferry.png" "$ICON_DIR/dev.ferry.Ferry.png"
+    
     update-desktop-database "$DESKTOP_DIR" 2>/dev/null || true
-    echo "  ✓ Installed .desktop entry: $DESKTOP_DIR/dev.ferry.Ferry.desktop"
+    gtk-update-icon-cache "${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor" 2>/dev/null || true
+    echo "  ✓ Installed .desktop entry and icon"
 
     echo ""
     echo "Ferry integration installed successfully."

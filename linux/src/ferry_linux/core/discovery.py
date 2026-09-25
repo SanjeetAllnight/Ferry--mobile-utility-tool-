@@ -70,7 +70,7 @@ class DiscoveredDevice:
         if not device_id:
             return None
 
-        device_name = get_prop(b"name", "Unknown Ferry Peer")
+        device_name = get_prop(b"name", "Unknown Raven Peer")
         device_type = get_prop(b"type", "unknown")
         os_name = get_prop(b"os", "unknown")
 

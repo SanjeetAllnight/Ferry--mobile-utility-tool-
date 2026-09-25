@@ -1,9 +1,9 @@
 [Desktop Entry]
-Name=Ferry
+Name=Raven
 GenericName=File Transfer
 Comment=Secure Android ↔ Linux file transfer over local Wi-Fi
 Exec=ferry
-Icon=applications-internet
+Icon=dev.ferry.Ferry
 Terminal=false
 Type=Application
 Categories=Network;FileTransfer;GTK;

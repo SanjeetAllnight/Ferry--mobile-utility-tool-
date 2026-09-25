@@ -1,8 +1,0 @@
-{
-  "device_name": "archnoir (Ferry)",
-  "device_id": "3574c507-d417-462d-aecd-b199678eb77f",
-  "listen_port": 53770,
-  "download_dir": "/home/sanjeet/Downloads/Ferry",
-  "auto_accept_paired": false,
-  "max_chunk_size": 65536
-}

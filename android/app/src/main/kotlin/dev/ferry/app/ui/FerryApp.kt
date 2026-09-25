@@ -157,7 +157,7 @@ fun FerryApp(
                     title = {
                         Column(verticalArrangement = Arrangement.Center) {
                             Text(
-                                "FERRY",
+                                "RAVEN",
                                 style = MaterialTheme.typography.labelLarge,
                                 color = MaterialTheme.colorScheme.primary,
                                 fontWeight = FontWeight.Bold
@@ -352,7 +352,7 @@ fun FerryApp(
                                     color = MaterialTheme.colorScheme.primary
                                 )
                                 Text(
-                                    text = "Make sure Ferry is running on your desktop on the same Wi-Fi.",
+                                    text = "Make sure Raven is running on your desktop on the same Wi-Fi.",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )

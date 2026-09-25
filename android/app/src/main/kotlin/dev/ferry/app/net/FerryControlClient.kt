@@ -338,7 +338,7 @@ class FerryControlClient(
             val localDeviceId = prefs.getString("device_id", null) ?: java.util.UUID.randomUUID().toString().also {
                 prefs.edit().putString("device_id", it).apply()
             }
-            val localDeviceName = android.os.Build.MODEL?.let { "$it (Ferry)" } ?: "Android Device (Ferry)"
+            val localDeviceName = android.os.Build.MODEL?.let { "$it (Raven)" } ?: "Android Device (Raven)"
 
             val initPayload = JSONObject().apply {
                 put("device_id", localDeviceId)

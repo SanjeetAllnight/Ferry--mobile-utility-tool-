@@ -18,7 +18,7 @@ import uuid
 @dataclass
 class FerryConfig:
     """Ferry configuration settings."""
-    device_name: str = field(default_factory=lambda: f"{socket.gethostname()} (Ferry)")
+    device_name: str = field(default_factory=lambda: f"{socket.gethostname()} (Raven)")
     device_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     listen_port: int = 53770
     download_dir: str = field(default_factory=lambda: str(Path.home() / "Downloads" / "Ferry"))

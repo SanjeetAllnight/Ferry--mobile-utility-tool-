@@ -80,7 +80,7 @@ class NotificationManager:
         size_str = _format_size(file_size)
         self._send(
             "Incoming file from " + device_name,
-            f"\"{file_name}\" ({size_str}) — open Ferry to accept or reject.",
+            f"\"{file_name}\" ({size_str}) — open Raven to accept or reject.",
         )
 
     def transfer_complete(self, file_name: str, success: bool, direction: str = "INCOMING") -> None:
@@ -98,13 +98,13 @@ class NotificationManager:
 
     def session_established(self, device_name: str) -> None:
         """Notify user that a secure session has been established."""
-        self._send("Ferry connected", f"Secure session established with {device_name}.")
+        self._send("Raven connected", f"Secure session established with {device_name}.")
 
     def pairing_request(self, device_name: str, sas: str) -> None:
         """Notify user of incoming pairing request."""
         self._send(
             "Pairing request from " + device_name,
-            f"Verify code: {sas} — open Ferry to accept or reject.",
+            f"Verify code: {sas} — open Raven to accept or reject.",
         )
 
     def clipboard_sync_received(self, device_name: str) -> None:

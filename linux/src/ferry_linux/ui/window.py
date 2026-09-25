@@ -33,7 +33,7 @@ class FerryMainWindow(Adw.ApplicationWindow):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
 
-        self.set_title("Ferry")
+        self.set_title("Raven")
         self.set_default_size(760, 640)
 
         # Track active transfer UIs: transfer_id -> (row, progress_bar, label)
@@ -88,10 +88,10 @@ class FerryMainWindow(Adw.ApplicationWindow):
         # ── Status Banner ─────────────────────────────────────────────────
         self.status_page = Adw.StatusPage()
         self.status_page.set_icon_name("network-wireless-symbolic")
-        self.status_page.set_title("Ferry")
+        self.status_page.set_title("Raven")
         self.status_page.set_description(
             "Local Android ↔ Linux File Transfer\n"
-            "Open Ferry on your Android phone to connect"
+            "Open Raven on your Android phone to connect"
         )
         content_box.append(self.status_page)
 
@@ -102,7 +102,7 @@ class FerryMainWindow(Adw.ApplicationWindow):
         content_box.append(pref_group)
 
         service_row = Adw.ActionRow()
-        service_row.set_title("Ferry Core Discovery Service")
+        service_row.set_title("Raven Core Discovery Service")
         service_row.set_subtitle("mDNS announcement and browser active (_ferry._tcp)")
         service_row.set_icon_name("system-run-symbolic")
         status_label = Gtk.Label(label="Active")
@@ -133,7 +133,7 @@ class FerryMainWindow(Adw.ApplicationWindow):
 
         # ── Nearby Devices ────────────────────────────────────────────────
         self.devices_group = Adw.PreferencesGroup()
-        self.devices_group.set_title("Nearby Ferry Devices (Untrusted)")
+        self.devices_group.set_title("Nearby Raven Devices (Untrusted)")
         self.devices_group.set_description("Peers discovered on the local Wi-Fi / LAN")
         content_box.append(self.devices_group)
         self._device_rows: list[Adw.ActionRow] = []
@@ -303,8 +303,8 @@ class FerryMainWindow(Adw.ApplicationWindow):
         self._device_rows.clear()
 
         empty_row = Adw.ActionRow()
-        empty_row.set_title("No Ferry Devices Discovered")
-        empty_row.set_subtitle("Ensure Ferry is open on your Android phone on the same Wi-Fi")
+        empty_row.set_title("No Raven Devices Discovered")
+        empty_row.set_subtitle("Ensure Raven is open on your Android phone on the same Wi-Fi")
         empty_row.set_icon_name("network-wireless-offline-symbolic")
         self.devices_group.add(empty_row)
         self._device_rows.append(empty_row)
@@ -774,7 +774,7 @@ class FerryMainWindow(Adw.ApplicationWindow):
 
         dialog = Adw.MessageDialog(
             transient_for=self,
-            heading="Ferry Settings",
+            heading="Raven Settings",
             body=body,
         )
         dialog.add_response("ok", "OK")
